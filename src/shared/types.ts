@@ -565,3 +565,42 @@ export interface PendingMigration {
   fileName: string
   analysis: MigrationAnalysis
 }
+
+// ---------------------------------------------------------------- AI assistants
+
+export interface AiConnection {
+  id: number
+  name: string
+  kind: 'token' | 'oauth'
+  mode: 'read' | 'write'
+  clientId: string | null
+  createdAt: string
+  lastUsedAt: string | null
+  revokedAt: string | null
+}
+
+export interface AiActivity extends AuditEvent {
+  /** This change can still be undone. */
+  canUndo: boolean
+}
+
+export interface AiStatus {
+  enabled: boolean
+  running: boolean
+  port: number
+  /** Address for assistants on this computer, e.g. http://127.0.0.1:47815/mcp */
+  mcpUrl: string
+  error: string | null
+  tunnel: {
+    status: 'off' | 'starting' | 'on' | 'error'
+    /** Public address for Grok while the tunnel is on, e.g. https://abc.trycloudflare.com/mcp */
+    mcpUrl: string | null
+    error: string | null
+    mode: 'quick' | 'named'
+    hostname: string | null
+    hasToken: boolean
+  }
+  cloudflaredInstalled: boolean
+  connections: AiConnection[]
+  claudeDesktop: { configPath: string | null; connected: boolean }
+}

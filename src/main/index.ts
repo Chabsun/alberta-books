@@ -8,8 +8,11 @@
  *  - a single instance, so two copies can never write to the same books
  */
 import { app, BrowserWindow, dialog, Menu, nativeTheme, net, protocol, session, shell } from 'electron'
+import { spawn } from 'node:child_process'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { AiManager, readServerUrl } from './ai/manager'
+import { runStdioBridge } from './ai/stdio'
 import { AppContext } from './context'
 import { registerIpc } from './ipc'
 import { initLog, logError } from './log'
@@ -43,6 +46,35 @@ if (!app.isPackaged && process.env.ALBERTA_BOOKS_DATA_DIR) {
 
 let ctx: AppContext | null = null
 let mainWindow: BrowserWindow | null = null
+let ai: AiManager | null = null
+
+/**
+ * `--mcp-stdio`: started by Claude Desktop. No window and no database access:
+ * it only relays MCP messages between Claude (stdin/stdout) and the running
+ * app's local server, starting the app if needed.
+ */
+function runBridgeMode(): void {
+  app.dock?.hide()
+  const token = process.env.ALBERTA_BOOKS_TOKEN ?? ''
+  if (!/^abk_[\w-]{43}$/.test(token)) {
+    process.stderr.write('ALBERTA_BOOKS_TOKEN is missing or invalid. Connect Claude Desktop from Alberta Books → Settings → AI assistants.\n')
+    app.exit(2)
+    return
+  }
+  const launchApp = () => {
+    const env = { ...process.env }
+    delete env.ALBERTA_BOOKS_TOKEN
+    spawn(process.execPath, app.isPackaged ? [] : [app.getAppPath()], { detached: true, stdio: 'ignore', env }).unref()
+  }
+  void runStdioBridge({
+    input: process.stdin,
+    output: process.stdout,
+    serverUrl: readServerUrl,
+    token,
+    launchApp,
+    log: (m) => process.stderr.write(`[alberta-books] ${m}\n`)
+  }).then(() => app.exit(0))
+}
 
 function isTrustedUrl(url: string): boolean {
   try {
@@ -145,7 +177,9 @@ function createWindow(): void {
   void mainWindow.loadURL(DEV_URL ?? `${APP_ORIGIN}/index.html`)
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (process.argv.includes('--mcp-stdio')) {
+  runBridgeMode()
+} else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
@@ -173,6 +207,9 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc(() => ctx!, isTrustedUrl)
     buildMenu()
     createWindow()
+    ai = new AiManager(() => ctx!, () => mainWindow)
+    ctx.ai = ai
+    void ai.startIfEnabled()
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
@@ -183,6 +220,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('will-quit', () => {
+    void ai?.shutdown()
     if (!ctx) return
     try {
       ctx.backupIfChanged()

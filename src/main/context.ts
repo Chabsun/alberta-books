@@ -9,10 +9,14 @@ import { receiptFiles } from './services/receipts'
 import { backupTo, listBackups, pruneBackups, validateDatabaseFile } from './services/backup'
 import { getSettings } from './services/settings'
 import { logError } from './log'
+import type { AiManager } from './ai/manager'
 
 export class AppContext {
   db: Db
   private changesAtLastBackup = 0
+
+  /** AI assistant server and tunnel; set by the main process at startup. */
+  ai!: AiManager
 
   /** Receipt files live next to the database. */
   readonly receiptsDir: string

@@ -11,6 +11,8 @@ import { isIsoDate } from './dates'
 import { ACCOUNT_TYPES } from './types'
 import type {
   Account,
+  AiActivity,
+  AiStatus,
   AccountLedger,
   Asset,
   AuditEvent,
@@ -335,6 +337,23 @@ export const schemas = {
     to: date.optional(),
     dryRun: z.boolean().optional()
   }),
+  // AI assistants (the assistants themselves can never call these)
+  'ai.status': none,
+  'ai.setEnabled': z.object({ enabled: z.boolean() }),
+  'ai.createToken': z.object({ name: requiredText(60, 'Name'), mode: z.enum(['read', 'write']) }),
+  'ai.connectClaudeDesktop': z.object({ mode: z.enum(['read', 'write']) }),
+  'ai.connectClaudeCode': z.object({ mode: z.enum(['read', 'write']) }),
+  'ai.setMode': z.object({ id, mode: z.enum(['read', 'write']) }),
+  'ai.revoke': z.object({ id }),
+  'ai.startTunnel': z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('quick') }),
+    z.object({ mode: z.literal('named'), hostname: requiredText(200, 'Hostname'), token: text(2000).optional() })
+  ]),
+  'ai.stopTunnel': none,
+  'ai.installCloudflared': none,
+  'ai.activity': z.object({ limit: z.int().min(1).max(2000).optional() }).optional(),
+  'ai.undo': z.object({ auditId: id }),
+
   'migration.openingBalances': z.object({
     date,
     balances: z
@@ -424,6 +443,18 @@ export interface Outputs {
   'migration.uploadFile': PendingMigration
   'migration.import': MigrationResult
   'migration.openingBalances': { entryId: number }
+  'ai.status': AiStatus
+  'ai.setEnabled': AiStatus
+  'ai.createToken': { status: AiStatus; token: string }
+  'ai.connectClaudeDesktop': AiStatus
+  'ai.connectClaudeCode': { status: AiStatus; token: string; command: string }
+  'ai.setMode': AiStatus
+  'ai.revoke': AiStatus
+  'ai.startTunnel': AiStatus
+  'ai.stopTunnel': AiStatus
+  'ai.installCloudflared': AiStatus
+  'ai.activity': AiActivity[]
+  'ai.undo': AiActivity[]
 }
 
 export type Output<M extends Method> = Outputs[M]
@@ -434,4 +465,6 @@ export type RpcResult<T> = { ok: true; data: T } | { ok: false; error: string }
 export interface BooksBridge {
   platform: string
   call(method: string, input: unknown): Promise<RpcResult<unknown>>
+  /** Subscribes to changes made outside the window (AI assistants). Returns an unsubscribe function. */
+  onChanged(fn: () => void): () => void
 }

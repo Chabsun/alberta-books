@@ -12,6 +12,8 @@ import type { BackupStatus } from '../shared/types'
 import type { AppContext } from './context'
 import { UserError } from './errors'
 import { invoiceHtml, renderPdf } from './pdf'
+import { listAiActivity, undoAiActivity } from './ai/activity'
+import { revokeConnection, setConnectionMode } from './ai/connections'
 import { holdFile, releaseFile, takeFile } from './pendingFiles'
 import { buildAccountantPackage } from './services/accountantPackage'
 import { listAccounts, saveAccount } from './services/accounts'
@@ -394,5 +396,27 @@ export const handlers: Handlers = {
     }
     return result
   },
-  'migration.openingBalances': (input, ctx) => ({ entryId: setOpeningBalances(ctx.db, input.date, input.balances) })
+  'migration.openingBalances': (input, ctx) => ({ entryId: setOpeningBalances(ctx.db, input.date, input.balances) }),
+
+  'ai.status': (_i, ctx) => ctx.ai.status(),
+  'ai.setEnabled': (input, ctx) => ctx.ai.setEnabled(input.enabled),
+  'ai.createToken': (input, ctx) => ctx.ai.createToken(input.name, input.mode),
+  'ai.connectClaudeDesktop': (input, ctx) => ctx.ai.connectClaudeDesktop(input.mode),
+  'ai.connectClaudeCode': (input, ctx) => ctx.ai.connectClaudeCode(input.mode),
+  'ai.setMode': (input, ctx) => {
+    setConnectionMode(ctx.db, input.id, input.mode)
+    return ctx.ai.status()
+  },
+  'ai.revoke': (input, ctx) => {
+    revokeConnection(ctx.db, input.id)
+    return ctx.ai.status()
+  },
+  'ai.startTunnel': (input, ctx) => ctx.ai.startTunnel(input),
+  'ai.stopTunnel': (_i, ctx) => ctx.ai.stopTunnel(),
+  'ai.installCloudflared': (_i, ctx) => ctx.ai.installCloudflared(),
+  'ai.activity': (input, ctx) => listAiActivity(ctx.db, input?.limit),
+  'ai.undo': (input, ctx) => {
+    undoAiActivity(ctx.db, input.auditId)
+    return listAiActivity(ctx.db)
+  }
 }

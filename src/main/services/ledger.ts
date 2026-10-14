@@ -218,5 +218,9 @@ export function reverseManualEntry(db: Db, id: number, date: string): JournalEnt
     }
     throw new UserError(where[entry.source] ?? 'This entry cannot be reversed here.')
   }
+  // Entries made from the bank feed are undone there, so the transaction goes back in the queue.
+  if (db.get('SELECT 1 FROM bank_transactions WHERE entry_id = ?', id)) {
+    throw new UserError('This entry came from the bank feed. Undo it from the Bank page instead.')
+  }
   return getEntry(db, reverseEntry(db, id, date))
 }
