@@ -122,7 +122,7 @@ export function ccaSchedule(db: Db, fiscalYearEnd: string): CcaSchedule {
         rows.push({
           ccaClass: cls.number,
           label: ccaClass === '10.1' ? `${cls.label}: ${inPool[0]?.description ?? ''}` : cls.label,
-          ratePct: cls.rate * 100,
+          ratePct: Math.round(cls.rate * 10000) / 100,
           openingUccCents: opening,
           additionsCents: additions,
           disposalsCents: disposals,

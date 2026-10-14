@@ -1,7 +1,11 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import {
   BarChart3,
   BookOpen,
+  Bot,
+  Car,
+  CalendarCheck,
+  FolderInput,
   FileText,
   Landmark,
   LayoutDashboard,
@@ -17,7 +21,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { FeedbackProvider } from './components/feedback'
 import { cx } from './components/ui'
-import { useQuery } from './lib/api'
+import { invalidate, useQuery } from './lib/api'
 import { match, navigate, usePath } from './lib/router'
 import { useTheme, type ThemeChoice } from './lib/theme'
 import Dashboard from './pages/Dashboard'
@@ -26,7 +30,11 @@ import InvoiceEditor from './pages/InvoiceEditor'
 import InvoiceDetail from './pages/InvoiceDetail'
 import Clients from './pages/Clients'
 import Expenses from './pages/Expenses'
-import BankImport from './pages/BankImport'
+import BankFeed from './pages/BankFeed'
+import Vehicle from './pages/Vehicle'
+import YearEnd from './pages/YearEnd'
+import Ai from './pages/Ai'
+import Migrate from './pages/Migrate'
 import Journal from './pages/Journal'
 import Accounts from './pages/Accounts'
 import AccountLedger from './pages/AccountLedger'
@@ -52,8 +60,9 @@ const NAV: { heading?: string; items: NavItem[] }[] = [
   {
     heading: 'Money out',
     items: [
+      { to: '/bank', label: 'Bank feed', icon: Landmark },
       { to: '/expenses', label: 'Expenses', icon: Receipt },
-      { to: '/bank-import', label: 'Bank import', icon: Landmark }
+      { to: '/vehicle', label: 'Company vehicle', icon: Car }
     ]
   },
   {
@@ -62,7 +71,15 @@ const NAV: { heading?: string; items: NavItem[] }[] = [
       { to: '/journal', label: 'Journal', icon: BookOpen },
       { to: '/accounts', label: 'Chart of accounts', icon: ListTree },
       { to: '/reports', label: 'Reports', icon: BarChart3 },
-      { to: '/gst', label: 'GST return', icon: Percent }
+      { to: '/gst', label: 'GST return', icon: Percent },
+      { to: '/year-end', label: 'Year end', icon: CalendarCheck }
+    ]
+  },
+  {
+    heading: 'Connect',
+    items: [
+      { to: '/ai', label: 'AI assistants', icon: Bot },
+      { to: '/migrate', label: 'QuickBooks / Zoho', icon: FolderInput }
     ]
   }
 ]
@@ -77,7 +94,11 @@ function route(path: string): ReactNode {
   if ((m = match('/invoices/:id', p))) return <InvoiceDetail key={m.id} id={Number(m.id)} />
   if (p === '/clients') return <Clients />
   if (p === '/expenses') return <Expenses />
-  if (p === '/bank-import') return <BankImport />
+  if (p === '/bank' || p === '/bank-import') return <BankFeed />
+  if (p === '/vehicle') return <Vehicle />
+  if (p === '/year-end') return <YearEnd />
+  if (p === '/ai') return <Ai />
+  if (p === '/migrate') return <Migrate />
   if (p === '/journal') return <Journal />
   if (p === '/accounts') return <Accounts />
   if ((m = match('/accounts/:id', p))) return <AccountLedger key={m.id} id={Number(m.id)} />
@@ -182,6 +203,8 @@ function Sidebar({ path }: { path: string }) {
 
 export default function App() {
   const path = usePath()
+  // An AI assistant changed the books: refresh what's on screen.
+  useEffect(() => window.books.onChanged(invalidate), [])
   return (
     <FeedbackProvider>
       <div className="flex h-full">

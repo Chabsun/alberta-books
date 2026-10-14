@@ -1,5 +1,6 @@
 import { AlertTriangle, ArrowRight, CheckCircle2, Circle, FileText, HardDriveDownload, Plus, Receipt } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { IssueList } from '../components/books'
 import { IncomeChart } from '../components/IncomeChart'
 import { InvoiceStatusBadge, SourceBadge } from '../components/domain'
 import { Button, Card, ErrorNote, LoadingBlock, Money, Page, PageHeader, cx } from '../components/ui'
@@ -20,6 +21,7 @@ function Stat({ label, value, note, tone }: { label: string; value: ReactNode; n
 export default function Dashboard() {
   const { data, error } = useQuery('reports.dashboard')
   const settings = useQuery('settings.get')
+  const issues = useQuery('issues.list')
 
   if (error) return <Page><ErrorNote message={error} /></Page>
   if (!data || !settings.data) return <LoadingBlock />
@@ -31,6 +33,7 @@ export default function Dashboard() {
   const setupDone = {
     company: settings.data.companyName !== 'My Corporation Ltd.',
     gst: settings.data.gstNumber !== '',
+    fiscal: settings.data.fiscalYearEndMonth !== 12,
     activity: !isEmpty
   }
 
@@ -53,11 +56,18 @@ export default function Dashboard() {
 
       {!(setupDone.company && setupDone.gst && setupDone.activity) ? (
         <Card className="mb-6" title="Get set up" description="A few steps and your books are ready.">
-          <ol className="grid gap-2 sm:grid-cols-3">
+          <ol className="grid gap-2 sm:grid-cols-4">
             <SetupStep done={setupDone.company} label="Add your company details" onClick={() => navigate('/settings')} />
             <SetupStep done={setupDone.gst} label="Enter your GST number" onClick={() => navigate('/settings')} />
-            <SetupStep done={setupDone.activity} label="Record your opening bank balance" onClick={() => navigate('/journal?preset=opening')} />
+            <SetupStep done={setupDone.fiscal} label="Set your fiscal year end" onClick={() => navigate('/settings')} />
+            <SetupStep done={setupDone.activity} label="Bring in opening balances" onClick={() => navigate('/migrate')} />
           </ol>
+        </Card>
+      ) : null}
+
+      {issues.data && issues.data.filter((i) => i.code !== 'setup_company').length ? (
+        <Card className="mb-6" title="Needs attention" description="Missing paperwork CRA asks for, possible mistakes and coming deadlines." bodyClassName="px-5 py-1">
+          <IssueList issues={issues.data.filter((i) => i.code !== 'setup_company')} limit={6} />
         </Card>
       ) : null}
 

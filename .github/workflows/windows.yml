@@ -32,19 +32,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit tests (ledger, GST, reports, import, backups)
+      - name: Unit tests (ledger, CRA rules, bank feed, AI server, accountant package)
         run: npm test
 
       - name: Build app
         run: npm run build
 
-      - name: End-to-end test of the real app on Windows
+      - name: End-to-end test of the real app on Windows (incl. AI over HTTP, OAuth and the Claude Desktop stdio bridge)
         run: node e2e/screens.mjs
 
       - name: Build Windows installer
         run: npx electron-builder --win --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Packaged app starts in Claude Desktop bridge mode
+        run: node e2e/packaged-bridge.mjs dist/win-unpacked/AlbertaBooks.exe
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

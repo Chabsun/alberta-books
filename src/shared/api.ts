@@ -117,6 +117,7 @@ const range = z
 export const schemas = {
   'app.info': none,
   'app.setTheme': z.object({ theme: z.enum(['system', 'light', 'dark']) }),
+  'app.copy': z.object({ text: z.string().max(5000) }),
 
   'settings.get': none,
   'settings.update': z.object({
@@ -370,6 +371,7 @@ export type ParsedInput<M extends Method> = z.output<(typeof schemas)[M]>
 export interface Outputs {
   'app.info': { version: string; platform: string; databasePath: string }
   'app.setTheme': null
+  'app.copy': null
   'settings.get': Settings
   'settings.update': Settings
   'accounts.list': Account[]

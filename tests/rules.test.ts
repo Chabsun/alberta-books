@@ -300,3 +300,13 @@ describe('tax adjustments (Schedule 1)', () => {
     expect(t.netIncomeForTaxCents).toBe(98_465_00 + 205_00 + 1_050_00 + 75_00 - 1_650_00)
   })
 })
+
+describe('CRA deadlines', () => {
+  it('counts from a month-end year end to the last day of the month', async () => {
+    const { monthEndAfter } = await import('../src/shared/dates')
+    expect(monthEndAfter('2026-08-31', 6)).toBe('2027-02-28')
+    expect(monthEndAfter('2027-08-31', 6)).toBe('2028-02-29')
+    expect(monthEndAfter('2026-08-31', 3)).toBe('2026-11-30')
+    expect(monthEndAfter('2026-12-31', 6)).toBe('2027-06-30')
+  })
+})

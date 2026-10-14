@@ -238,7 +238,7 @@ export const TOOLS: Tool[] = [
     mode: 'read',
     description: 'Sales invoices with status (draft, open, partial, overdue, paid, void) and balance due.',
     input: z.object({ status: z.enum(['draft', 'open', 'partial', 'overdue', 'paid', 'void']).optional() }),
-    run: (i, { db }) => listInvoices(db).filter((x) => !i.status || x.status === i.status)
+    run: (i, { db }) => listInvoices(db).filter((x) => !i.status || x.displayStatus === i.status)
   }),
   tool({
     name: 'list_clients',

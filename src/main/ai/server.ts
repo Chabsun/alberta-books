@@ -311,6 +311,7 @@ export class AiServer {
     if (q.get('code_challenge_method') !== 'S256' || !/^[\w-]{43,128}$/.test(challenge)) {
       return this.redirect(res, back({ error: 'invalid_request', error_description: 'PKCE with S256 is required' }))
     }
+    this.sweep()
     if (this.approving || !this.authorizeLimit.take()) {
       return this.redirect(res, back({ error: 'temporarily_unavailable', error_description: 'Another approval is waiting in Alberta Books' }))
     }
@@ -362,6 +363,12 @@ async function check() {
 check();
 </script>`
     )
+  }
+
+  /** Drops approvals nobody is waiting for and codes that were never exchanged. */
+  private sweep(now = Date.now()): void {
+    for (const [k, p] of this.pending) if (p.expires < now - 60_000) this.pending.delete(k)
+    for (const [k, c] of this.codes) if (c.expires < now) this.codes.delete(k)
   }
 
   private authorizeStatus(res: ServerResponse, url: URL): void {

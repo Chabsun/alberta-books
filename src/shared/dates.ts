@@ -69,6 +69,13 @@ export function monthEnd(iso: string): string {
   return `${y}-${pad(m)}-${pad(lastDayOfMonth(y, m))}`
 }
 
+/** Last day of the month `months` after the month of `iso` (CRA deadlines counted from a month-end year end). */
+export function monthEndAfter(iso: string, months: number): string {
+  const [y, m] = iso.split('-').map(Number)
+  const total = y * 12 + (m - 1) + months
+  return monthEnd(`${Math.floor(total / 12)}-${pad((total % 12) + 1)}-01`)
+}
+
 /** 'YYYY-MM' keys for the `count` months ending with the month of `iso`. */
 export function lastMonths(iso: string, count: number): string[] {
   const [y, m] = iso.split('-').map(Number)

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Lock, Plus } from 'lucide-react'
+import { TAX_RULES, taxRule } from '../../../shared/taxRules'
 import type { Account, AccountType } from '../../../shared/types'
+import { RuleHint } from '../components/books'
 import { TYPE_LABELS } from '../components/domain'
 import { useFeedback } from '../components/feedback'
 import { Badge, Button, Card, Checkbox, ErrorNote, Field, Input, LoadingBlock, Modal, Money, Page, PageHeader, Select, td, tdNum, th, thNum, trClickable } from '../components/ui'
@@ -63,6 +65,7 @@ export default function Accounts() {
                           <span className={a.archived ? 'text-faint' : ''}>{a.name}</span>
                           {a.isBank ? <Badge className="ml-2">Bank</Badge> : null}
                           {a.archived ? <Badge className="ml-2">Archived</Badge> : null}
+                          {a.taxRule && a.taxRule !== 'standard' ? <div className="truncate text-xs text-faint">{taxRule(a.taxRule).label}</div> : null}
                         </td>
                         <td className={`${td} text-muted tabular`}>{a.gifiCode ?? '—'}</td>
                         <td className={`${td} text-right`}>
@@ -100,6 +103,7 @@ function AccountModal({ open, account, onClose }: { open: boolean; account: Acco
   const [gifi, setGifi] = useState('')
   const [isBank, setIsBank] = useState(false)
   const [archived, setArchived] = useState(false)
+  const [rule, setRule] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -111,6 +115,7 @@ function AccountModal({ open, account, onClose }: { open: boolean; account: Acco
     setGifi(account?.gifiCode ?? '')
     setIsBank(account?.isBank ?? false)
     setArchived(account?.archived ?? false)
+    setRule(account?.taxRule ?? '')
     setError(null)
   }, [open, account])
 
@@ -119,7 +124,8 @@ function AccountModal({ open, account, onClose }: { open: boolean; account: Acco
   async function save() {
     setSaving(true)
     try {
-      await mutate('accounts.save', { id: account?.id, code, name, type, gifiCode: gifi, isBank, archived })
+      const taxRule = type === 'expense' ? rule || 'standard' : type === 'asset' && !isBank ? rule || null : null
+      await mutate('accounts.save', { id: account?.id, code, name, type, gifiCode: gifi, isBank, archived, taxRule })
       fb.success(account ? 'Account updated' : 'Account added')
       onClose()
     } catch (e) {
@@ -134,7 +140,7 @@ function AccountModal({ open, account, onClose }: { open: boolean; account: Acco
       open={open}
       onClose={onClose}
       title={account ? 'Edit account' : 'New account'}
-      width="sm"
+      width="md"
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
@@ -165,6 +171,23 @@ function AccountModal({ open, account, onClose }: { open: boolean; account: Acco
             {(id) => <Input id={id} value={gifi} onChange={(e) => setGifi(e.target.value)} placeholder="e.g. 8810" className="tabular" />}
           </Field>
         </div>
+        {type === 'expense' || (type === 'asset' && !isBank) ? (
+          <Field label="CRA rule" hint={type === 'expense' ? 'How much is deductible and how much GST comes back.' : 'For equipment and vehicles bought through Expenses.'}>
+            {(id) => (
+              <Select id={id} value={rule} onChange={(e) => setRule(e.target.value)}>
+                {type === 'asset' ? <option value="">None (not a capital asset category)</option> : null}
+                {Object.values(TAX_RULES)
+                  .filter((r) => (type === 'expense' ? !r.ccaClass : !!r.ccaClass))
+                  .map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.label}
+                    </option>
+                  ))}
+              </Select>
+            )}
+          </Field>
+        ) : null}
+        {type === 'expense' || (type === 'asset' && !isBank && rule) ? <RuleHint ruleId={rule || 'standard'} /> : null}
         {type === 'asset' || type === 'liability' ? (
           <Checkbox label="Bank or credit card account (can receive or pay money)" checked={isBank} onChange={(e) => setIsBank(e.target.checked)} />
         ) : null}

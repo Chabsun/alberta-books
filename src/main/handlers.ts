@@ -3,7 +3,7 @@
  * here already validated. File dialogs are opened by the main process, so
  * the UI never chooses or sees file paths.
  */
-import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, nativeTheme, shell } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { Method, Output, ParsedInput } from '../shared/api'
@@ -156,6 +156,11 @@ export const handlers: Handlers = {
   // Keeps the Windows title bar (and native dialogs) in the same light/dark mode as the app.
   'app.setTheme': (input) => {
     nativeTheme.themeSource = input.theme
+    return null
+  },
+
+  'app.copy': (input) => {
+    clipboard.writeText(input.text)
     return null
   },
 

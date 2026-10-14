@@ -8,6 +8,10 @@
  * Fails if any screen shows an error or the console reports one.
  */
 import { _electron as electron } from 'playwright'
+import electronBinary from 'electron'
+import { unzipSync, strFromU8 } from 'fflate'
+import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -60,7 +64,8 @@ await rpc('settings.update', {
   gstNumber: '123456789 RT0001',
   address: '400 – 330 5 Ave SW\nCalgary, AB  T2P 0L4',
   email: 'billing@chabsun.ca',
-  phone: '403-555-0142'
+  phone: '403-555-0142',
+  fiscalYearEndMonth: 8
 })
 const accounts = await rpc('accounts.list')
 const acc = (code) => accounts.find((a) => a.code === code).id
@@ -107,6 +112,26 @@ for (let m = 1; m <= months; m++) {
   if (m % 3 === 0) await rpc('expenses.create', { date: d(m, 14), vendor: 'WestJet', description: 'Client visit – Edmonton', accountId: acc('5220'), amountCents: 42000, gstCents: 2100, paidFromAccountId: role('shareholder_loan') })
   if (m % 2 === 0) await rpc('expenses.create', { date: d(m, 18), vendor: 'Monogram Coffee', description: 'Client meeting', accountId: acc('5110'), amountCents: 3800, gstCents: 190, paidFromAccountId: acc('2100') })
 }
+// CRA rules: a laptop is a capital asset, meals need purpose and attendees, a leased company car.
+await rpc('expenses.create', { date: d(1, 20), vendor: 'Apple Store', description: 'MacBook Pro', accountId: acc('1500'), amountCents: 289900, gstCents: 14495, paidFromAccountId: acc('2100') })
+await rpc('expenses.create', {
+  date: d(Math.max(1, thisMonth - 1), 12),
+  vendor: 'Ruth’s Chris',
+  description: '',
+  accountId: acc('5110'),
+  amountCents: 31000,
+  gstCents: 1550,
+  paidFromAccountId: acc('2100'),
+  supplierGstNumber: '987654321 RT0001',
+  purpose: 'Contract renewal',
+  attendees: 'K. Chen (Prairie Pipeline)'
+})
+const car = await rpc('vehicles.save', { name: '2025 Toyota RAV4 Hybrid', ownership: 'leased', startDate: d(1, 1), monthlyLeaseCents: 68000, msrpCents: 4250000 })
+for (let m = 1; m <= months; m++) {
+  await rpc('expenses.create', { date: d(m, 3), vendor: 'Toyota Financial', description: 'Lease', accountId: acc('5233'), amountCents: 68000, gstCents: 3400, paidFromAccountId: role('bank'), vehicleId: car.id })
+  await rpc('vehicles.addTrip', { vehicleId: car.id, date: d(m, 28), km: 1400, kind: 'business', purpose: 'Client sites (monthly total)', route: 'Calgary area' })
+  await rpc('vehicles.addTrip', { vehicleId: car.id, date: d(m, 28), km: 350, kind: 'personal' })
+}
 await rpc('journal.create', {
   date: d(Math.max(1, thisMonth - 1), 15),
   memo: 'Dividend paid',
@@ -140,12 +165,16 @@ const screens = [
   ['/invoices/2', 'invoice-detail'],
   ['/clients', 'clients'],
   ['/expenses', 'expenses'],
-  ['/bank-import', 'bank-import'],
+  ['/bank', 'bank-feed'],
+  ['/vehicle', 'vehicle'],
   ['/journal', 'journal'],
   ['/accounts', 'accounts'],
   [`/accounts/${role('bank')}`, 'account-ledger'],
   ['/reports', 'reports'],
   ['/gst', 'gst'],
+  ['/year-end', 'year-end'],
+  ['/ai', 'ai'],
+  ['/migrate', 'migrate'],
   ['/settings', 'settings']
 ]
 
@@ -208,28 +237,52 @@ await stubDialogs(csvPath, null)
 await rpc('reports.exportCsv', { report: 'gifi', fiscalYearEnd: `${y}-12-31` })
 if (!readFileSync(csvPath, 'utf8').includes('2599')) throw new Error('CSV export failed')
 
-// Bank import through the UI
+// Bank feed through the UI: drop a statement, check the preview, import, categorize, post.
 const statement = join(outDir, 'statement.csv')
 writeFileSync(
   statement,
   ['Date,Description,Amount', `${pad(thisMonth)}/03/${y},STAPLES #123,-56.70`, `${pad(thisMonth)}/04/${y},"E-TRANSFER, BOW RIVER",9408.00`, `${pad(thisMonth)}/05/${y},MONTHLY ACCOUNT FEE,-15.95`].join('\n')
 )
-await stubDialogs(null, statement)
-await page.evaluate(() => (window.location.hash = '/bank-import'))
-await page.getByRole('button', { name: 'Choose CSV file…' }).click()
-await page.waitForSelector('text=STAPLES #123')
-const selects = page.getByLabel('Category')
-await selects.nth(0).selectOption({ label: 'Office expenses and supplies' })
-await selects.nth(1).selectOption({ index: 1 }) // first unpaid invoice
-await selects.nth(2).selectOption({ label: 'Bank charges' })
-await page.screenshot({ path: join(shots, 'light-bank-import-review.png') })
-await page.getByRole('button', { name: /Record 3 transactions/ }).click()
-await page.waitForSelector('text=3 transactions recorded')
-const again = await rpc('import.post', {
-  bankAccountId: role('bank'),
-  rows: [{ date: `${y}-${pad(thisMonth)}-03`, description: 'STAPLES #123', amountCents: -5670, target: { kind: 'account', accountId: acc('5160'), gstIncluded: true } }]
-})
-if (again.skippedDuplicates !== 1) throw new Error('Duplicate import was not skipped')
+await page.evaluate(() => (window.location.hash = '/bank'))
+await page.getByRole('button', { name: 'Import statement' }).first().click()
+await page.locator('dialog input[type=file]').setInputFiles(statement)
+await page.waitForSelector('dialog >> text=STAPLES #123')
+await page.screenshot({ path: join(shots, 'light-bank-import-preview.png') })
+await page.getByRole('button', { name: /Import 3 transactions/ }).click()
+await page.waitForSelector('text=Imported: 3 new transactions')
+await page.waitForTimeout(300)
+const rows = page.locator('tbody tr')
+if ((await rows.count()) !== 3) throw new Error('The queue should show 3 transactions')
+const pick = async (text, value) => {
+  const row = page.locator('tbody tr', { hasText: text })
+  const select = row.locator('select')
+  if (typeof value === 'number') await select.selectOption({ index: value })
+  else await select.selectOption({ label: value })
+}
+await pick('STAPLES', '5160 · Office expenses and supplies')
+await pick('BOW RIVER', 1) // first open invoice
+await pick('MONTHLY ACCOUNT FEE', '5120 · Bank charges')
+await page.screenshot({ path: join(shots, 'light-bank-feed-review.png') })
+await page.getByRole('button', { name: /Post 3 with a category/ }).click()
+await page.waitForSelector('text=3 transactions posted')
+const queue = await rpc('bank.list', { status: 'unreviewed' })
+if (queue.length !== 0) throw new Error('The queue should be empty after posting')
+const posted = await rpc('bank.list', { status: 'posted' })
+if (posted.length !== 3 || !posted.some((t) => t.linkKind === 'payment')) throw new Error('Bank lines were not posted as expected: ' + JSON.stringify(posted.map((t) => [t.description, t.linkKind, t.category])))
+// Importing the same file again adds nothing.
+const again = await rpc('bank.uploadStatement', { fileName: 'statement.csv', bytes: new Uint8Array(readFileSync(statement)) })
+const againResult = await rpc('bank.importStatement', { token: again.token, bankAccountId: role('bank') })
+if (againResult.inserted !== 0 || againResult.duplicates !== 3) throw new Error('Duplicate import was not skipped')
+// Accountant package
+const zipPath = join(outDir, 'package.zip')
+await stubDialogs(zipPath, null)
+const pkg = await rpc('package.export', { fiscalYearEnd: `${new Date().getMonth() + 1 > 8 ? y + 1 : y}-08-31` })
+if (pkg.savedTo !== zipPath) throw new Error('Package was not saved')
+const zip = unzipSync(new Uint8Array(readFileSync(zipPath)))
+for (const name of ['README.txt', '01 Financial statements.pdf', '02 Workbook.xlsx', 'import/trial_balance_with_GIFI.csv', 'import/quickbooks_online_journal.csv', 'import/xero_manual_journals.csv']) {
+  if (!zip[name]) throw new Error(`Package is missing ${name}`)
+}
+if (!strFromU8(zip['01 Financial statements.pdf'].subarray(0, 5)).startsWith('%PDF')) throw new Error('Package PDF is not a PDF')
 
 // Backup and restore round trip
 const before = (await rpc('invoices.list')).length
@@ -246,6 +299,64 @@ await stubDialogs(null, notABackup)
 const rejected = await page.evaluate(() => window.books.call('backup.restore'))
 if (rejected.ok) throw new Error('A non-backup file was restored')
 if ((await rpc('invoices.list')).length !== before) throw new Error('Books changed after a rejected restore')
+
+// ---- AI assistants ------------------------------------------------------------
+const ai = await rpc('ai.setEnabled', { enabled: true })
+if (!ai.running) throw new Error(`AI server did not start: ${ai.error}`)
+const base = ai.mcpUrl.replace(/\/mcp$/, '')
+const mcp = async (token, method, params = {}, id = 1) => {
+  const r = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params })
+  })
+  if (r.status !== 200) throw new Error(`MCP ${method}: HTTP ${r.status}`)
+  return (await r.json()).result
+}
+const { token } = await rpc('ai.createToken', { name: 'E2E', mode: 'write' })
+const init = await mcp(token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '1' } })
+if (init.serverInfo.name !== 'alberta-books') throw new Error('MCP initialize failed')
+const created = await mcp(token, 'tools/call', { name: 'create_expense', arguments: { date: today, vendor: 'Indigo', category: '5160', amount: '20.00', gst: '1.00', paid_from: '1000' } })
+if (created.isError) throw new Error(`AI write failed: ${created.content[0].text}`)
+const activity = await rpc('ai.activity')
+if (!activity.some((a) => a.actor === 'ai:E2E' && a.canUndo)) throw new Error('AI change is not in the activity log')
+
+// OAuth like Grok: register, authorize (approval dialog stubbed to "Allow read and make changes"), token.
+await stubDialogs(null, null)
+const reg = await (await fetch(`${base}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Grok', redirect_uris: ['https://grok.com/cb'] }) })).json()
+const verifier = randomBytes(32).toString('base64url')
+const challenge = createHash('sha256').update(verifier).digest('base64url')
+const authPage = await (await fetch(`${base}/authorize?${new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: 'https://grok.com/cb', code_challenge: challenge, code_challenge_method: 'S256', state: 's1' })}`)).text()
+const pendingId = /const id = "([\w-]+)"/.exec(authPage)[1]
+let location = null
+for (let i = 0; i < 50 && !location; i++) {
+  location = (await (await fetch(`${base}/authorize/status?id=${pendingId}`)).json()).location ?? null
+  if (!location) await new Promise((r) => setTimeout(r, 100))
+}
+const code = new URL(location).searchParams.get('code')
+const tokens = await (await fetch(`${base}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: reg.client_id, redirect_uri: 'https://grok.com/cb' }) })).json()
+const overview = await mcp(tokens.access_token, 'tools/call', { name: 'get_overview', arguments: {} })
+if (!JSON.parse(overview.content[0].text).company.name.startsWith('Chabsun')) throw new Error('OAuth token did not work')
+
+// Claude Desktop bridge: this app started with --mcp-stdio, talking over stdin/stdout.
+const bridge = spawn(electronBinary, [join(root, 'out/main/index.js'), '--mcp-stdio', ...(process.getuid?.() === 0 ? ['--no-sandbox'] : [])], {
+  env: { ...process.env, ALBERTA_BOOKS_DATA_DIR: dataDir, ALBERTA_BOOKS_TOKEN: token, ...(process.getuid?.() === 0 ? { ALBERTA_BOOKS_TEST_ROOT: '1' } : {}) },
+  stdio: ['pipe', 'pipe', 'pipe']
+})
+let bridgeOut = ''
+bridge.stdout.on('data', (c) => (bridgeOut += c))
+bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }) + '\n')
+bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
+bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\n')
+bridge.stdin.end()
+const bridgeCode = await new Promise((r) => bridge.on('exit', r))
+const bridgeLines = bridgeOut.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+if (bridgeCode !== 0 || bridgeLines.length !== 2 || bridgeLines[1].result.tools.length < 10) throw new Error(`stdio bridge failed (exit ${bridgeCode}): ${bridgeOut}`)
+
+await page.evaluate(() => (window.location.hash = '/ai'))
+await page.waitForTimeout(400)
+await page.screenshot({ path: join(shots, 'light-ai-connected.png') })
+await rpc('ai.setEnabled', { enabled: false })
 
 console.log(`PDF: ${pdfPath}`)
 await app.close()

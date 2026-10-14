@@ -3,7 +3,7 @@
  * Read-only: each issue says what to look at and where.
  */
 import type { Db } from '../db/connection'
-import { addDays, fiscalYearOf, todayIso } from '../../shared/dates'
+import { addDays, fiscalYearOf, monthEndAfter, todayIso } from '../../shared/dates'
 import { formatMoney } from '../../shared/money'
 import { taxRule } from '../../shared/taxRules'
 import type { Issue } from '../../shared/types'
@@ -111,14 +111,19 @@ export function findIssues(db: Db, today = todayIso()): Issue[] {
     `${year - 1}-12-31`
   )!.s
   if (dividends > 0 && today.slice(5) <= '03-31') {
-    push('info', 't5_due', `Dividends of ${formatMoney(dividends)} were paid in ${year - 1}: file the T5 slips and summary by the end of February ${year} (usually non-eligible dividends for a small business).`, '/reports')
+    push('info', 't5_due', `Dividends of ${formatMoney(dividends)} were paid in ${year - 1}: file the T5 slips and summary by the end of February ${year} (usually non-eligible dividends for a small business).`, '/year-end')
   }
 
-  // T2 due six months after year end; tax balance due two (or three for some CCPCs) months after
+  // After year end: the tax balance is due in 3 months (a CCPC claiming the small business deduction,
+  // 2 months otherwise) and the T2 by the end of the sixth month.
   const lastFyEnd = addDays(fy.start, -1)
-  const t2Due = addDays(lastFyEnd, 183)
+  const balanceDue = monthEndAfter(lastFyEnd, 3)
+  const t2Due = monthEndAfter(lastFyEnd, 6)
+  if (today > lastFyEnd && today <= balanceDue) {
+    push('warning', 'tax_balance_due', `Corporate income tax for the year ended ${lastFyEnd} must be paid by ${balanceDue} (3 months after year end for a CCPC claiming the small business deduction; 2 months otherwise), even though the T2 is due later.`, '/year-end')
+  }
   if (today > lastFyEnd && today <= t2Due) {
-    push('info', 't2_due', `Your T2 for the fiscal year ended ${lastFyEnd} is due by ${t2Due}. The accountant package (Reports) has everything your accountant needs.`, '/reports')
+    push('info', 't2_due', `Your T2 for the fiscal year ended ${lastFyEnd} is due by ${t2Due}. Export the accountant package from Year end.`, '/year-end')
   }
 
   if (settings.companyName === 'My Corporation Ltd.') push('info', 'setup_company', 'Add your company name and details in Settings.', '/settings')
