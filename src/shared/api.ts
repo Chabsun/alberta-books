@@ -12,22 +12,37 @@ import { ACCOUNT_TYPES } from './types'
 import type {
   Account,
   AccountLedger,
+  Asset,
+  AuditEvent,
   BackupStatus,
   BalanceSheet,
+  BankRule,
+  BankTransaction,
+  CcaSchedule,
   Client,
-  CsvFile,
   Dashboard,
   Expense,
+  ExpensePreview,
   FiledGstReturn,
   GifiReport,
   GstReturn,
-  ImportResult,
   IncomeStatement,
   Invoice,
   InvoiceSummary,
+  Issue,
   JournalEntry,
+  MigrationResult,
+  PendingMigration,
+  Receipt,
   Settings,
-  TrialBalance
+  StatementImportResult,
+  StatementPreview,
+  TaxAdjustments,
+  TrialBalance,
+  Vehicle,
+  VehicleBenefit,
+  VehicleLimits,
+  VehicleTrip
 } from './types'
 
 const MAX_CENTS = 99_999_999_999_99
@@ -41,6 +56,57 @@ const text = (max: number) => z.string().trim().max(max)
 const requiredText = (max: number, label: string) =>
   z.string().trim().min(1, `${label} is required`).max(max)
 const none = z.undefined()
+
+const pct = z.int().min(0).max(100)
+const year = z.int().min(2000).max(2100)
+const gstNumber = text(20).refine((s) => s === '' || /^\d{9}\s?RT\s?\d{4}$/i.test(s), 'GST number looks like 123456789 RT0001')
+/** Random handle for a file the main process is holding (see pendingFiles.ts). */
+const token = z.string().regex(/^[\w-]{24}$/, 'That file is no longer open. Choose it again.')
+const bytes = (maxMb: number) =>
+  z.instanceof(Uint8Array).refine((b) => b.length > 0 && b.length <= maxMb * 1024 * 1024, `Files can be up to ${maxMb} MB.`)
+const fileName = requiredText(200, 'File name')
+
+const col = z.int().min(0).max(200)
+const csvMapping = z.object({
+  date: col,
+  description: col,
+  amount: col.optional(),
+  debit: col.optional(),
+  credit: col.optional(),
+  dateFormat: z.enum(['ymd', 'mdy', 'dmy']),
+  hasHeader: z.boolean(),
+  flipSigns: z.boolean().optional()
+})
+
+const expenseInput = z.object({
+  date,
+  vendor: requiredText(150, 'Vendor'),
+  description: text(500).default(''),
+  accountId: id,
+  amountCents: positiveCents,
+  gstCents: nonNegativeCents,
+  paidFromAccountId: id,
+  businessPct: pct.optional(),
+  supplierGstNumber: gstNumber.optional(),
+  purpose: text(500).optional(),
+  attendees: text(500).optional(),
+  vehicleId: id.nullable().optional(),
+  primarilyBusiness: z.boolean().optional()
+})
+
+const categorizeTarget = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('account'),
+    accountId: id,
+    gstIncluded: z.boolean().optional(),
+    businessPct: pct.optional(),
+    purpose: text(500).optional(),
+    attendees: text(500).optional(),
+    supplierGstNumber: gstNumber.optional(),
+    memo: text(300).optional()
+  }),
+  z.object({ kind: z.literal('invoice'), invoiceId: id })
+])
 
 const range = z
   .object({ from: date, to: date })
@@ -56,9 +122,7 @@ export const schemas = {
     address: text(400).optional(),
     email: text(200).optional(),
     phone: text(50).optional(),
-    gstNumber: text(20)
-      .refine((s) => s === '' || /^\d{9}\s?RT\s?\d{4}$/i.test(s), 'GST number looks like 123456789 RT0001')
-      .optional(),
+    gstNumber: gstNumber.optional(),
     fiscalYearEndMonth: z.int().min(1).max(12).optional(),
     invoicePrefix: text(12).optional(),
     nextInvoiceNumber: z.int().positive().max(9_999_999).optional(),
@@ -79,6 +143,7 @@ export const schemas = {
       .regex(/^(\d{4})?$/, 'GIFI codes are 4 digits')
       .optional(),
     isBank: z.boolean().optional(),
+    taxRule: z.string().max(40).nullable().optional(),
     archived: z.boolean().optional()
   }),
 
@@ -123,14 +188,14 @@ export const schemas = {
   'invoices.exportPdf': z.object({ id }),
 
   'expenses.list': none,
-  'expenses.create': z.object({
-    date,
-    vendor: requiredText(150, 'Vendor'),
-    description: text(500).default(''),
-    accountId: id,
-    amountCents: positiveCents,
-    gstCents: nonNegativeCents,
-    paidFromAccountId: id
+  'expenses.preview': expenseInput,
+  'expenses.create': expenseInput,
+  'expenses.updateDetails': z.object({
+    id,
+    supplierGstNumber: gstNumber.optional(),
+    purpose: text(500).optional(),
+    attendees: text(500).optional(),
+    description: text(500).optional()
   }),
   'expenses.void': z.object({ id, date }),
 
@@ -177,23 +242,105 @@ export const schemas = {
   'backup.openFolder': none,
   'backup.restore': none,
 
-  'import.pickCsv': none,
-  'import.post': z.object({
-    bankAccountId: id,
-    rows: z
-      .array(
-        z.object({
-          date,
-          description: requiredText(300, 'Description'),
-          amountCents: cents.refine((v) => v !== 0, 'Amount cannot be zero'),
-          target: z.discriminatedUnion('kind', [
-            z.object({ kind: z.literal('account'), accountId: id, gstIncluded: z.boolean() }),
-            z.object({ kind: z.literal('invoice'), invoiceId: id })
-          ])
-        })
-      )
-      .min(1)
-      .max(5000)
+  // Bank feed
+  'bank.pickStatement': none,
+  'bank.uploadStatement': z.object({ fileName, bytes: bytes(10) }),
+  'bank.previewStatement': z.object({ token, mapping: csvMapping }),
+  'bank.importStatement': z.object({ token, bankAccountId: id, mapping: csvMapping.optional() }),
+  'bank.list': z
+    .object({
+      status: z.enum(['unreviewed', 'posted', 'excluded']).optional(),
+      accountId: id.optional(),
+      from: date.optional(),
+      to: date.optional(),
+      search: text(100).optional(),
+      limit: z.int().min(1).max(5000).optional()
+    })
+    .optional(),
+  'bank.categorize': z.object({ id, target: categorizeTarget, remember: z.boolean().default(false) }),
+  'bank.uncategorize': z.object({ id, date: date.optional() }),
+  'bank.exclude': z.object({ id, reason: text(200).default('') }),
+  'bank.rules': none,
+  'bank.saveRule': z.object({
+    pattern: requiredText(100, 'Text to match'),
+    matchType: z.enum(['contains', 'equals', 'starts']).optional(),
+    direction: z.enum(['any', 'in', 'out']).optional(),
+    accountId: id,
+    gstIncluded: z.boolean().optional(),
+    businessPct: pct.optional(),
+    autoPost: z.boolean().optional()
+  }),
+  'bank.deleteRule': z.object({ id }),
+
+  // Company vehicle
+  'vehicles.list': none,
+  'vehicles.save': z
+    .object({
+      id: id.optional(),
+      name: requiredText(80, 'Vehicle name'),
+      ownership: z.enum(['owned', 'leased']),
+      startDate: date,
+      endDate: date.nullable().optional(),
+      costCents: nonNegativeCents.optional(),
+      msrpCents: nonNegativeCents.optional(),
+      monthlyLeaseCents: nonNegativeCents.optional(),
+      zeroEmission: z.boolean().optional(),
+      notes: text(500).optional(),
+      archived: z.boolean().optional()
+    }),
+  'vehicles.trips': z.object({ vehicleId: id, from: date, to: date }),
+  'vehicles.addTrip': z.object({
+    vehicleId: id,
+    date,
+    km: z.int().min(1).max(100_000),
+    kind: z.enum(['business', 'personal']),
+    purpose: text(300).optional(),
+    route: text(300).optional()
+  }),
+  'vehicles.deleteTrip': z.object({ id }),
+  'vehicles.setYear': z.object({
+    vehicleId: id,
+    year,
+    reimbursedOperatingCents: nonNegativeCents,
+    reimbursedStandbyCents: nonNegativeCents,
+    electHalfStandby: z.boolean()
+  }),
+  'vehicles.benefit': z.object({ vehicleId: id, year }),
+  'vehicles.limits': z.object({ vehicleId: id, fiscalYearEnd: date }),
+
+  // Capital assets and year end
+  'cca.schedule': z.object({ fiscalYearEnd: date }),
+  'cca.assets': none,
+  'cca.setOpening': z.object({ ccaClass: z.enum(['8', '10', '10.1', '12', '12T', '50', '54']), asOf: date, uccCents: nonNegativeCents }),
+  'cca.dispose': z.object({ id, date, proceedsCents: nonNegativeCents }),
+  'tax.adjustments': z.object({ fiscalYearEnd: date }),
+  'issues.list': none,
+  'audit.list': z.object({ actorPrefix: text(60).optional(), limit: z.int().min(1).max(2000).optional() }).optional(),
+  'package.export': z.object({ fiscalYearEnd: date }),
+
+  // Receipts
+  'receipts.list': z.object({ expenseId: id.optional(), bankTransactionId: id.optional() }),
+  'receipts.pick': z.object({ expenseId: id.optional(), bankTransactionId: id.optional() }),
+  'receipts.upload': z.object({ fileName, bytes: bytes(15), expenseId: id.optional(), bankTransactionId: id.optional() }),
+  'receipts.open': z.object({ id }),
+
+  // Moving from QuickBooks or Zoho
+  'migration.pickFile': none,
+  'migration.uploadFile': z.object({ fileName, bytes: bytes(20) }),
+  'migration.import': z.object({
+    token,
+    source: z.enum(['quickbooks', 'zoho', 'other']),
+    mapping: z.record(z.string().max(200), id),
+    from: date.optional(),
+    to: date.optional(),
+    dryRun: z.boolean().optional()
+  }),
+  'migration.openingBalances': z.object({
+    date,
+    balances: z
+      .array(z.object({ accountId: id, debitCents: nonNegativeCents, creditCents: nonNegativeCents }))
+      .min(2, 'Enter at least two balances')
+      .max(500)
   })
 } as const
 
@@ -220,7 +367,9 @@ export interface Outputs {
   'invoices.voidPayment': Invoice
   'invoices.exportPdf': { savedTo: string | null }
   'expenses.list': Expense[]
+  'expenses.preview': ExpensePreview
   'expenses.create': Expense
+  'expenses.updateDetails': Expense
   'expenses.void': Expense
   'journal.list': JournalEntry[]
   'journal.create': JournalEntry
@@ -240,8 +389,41 @@ export interface Outputs {
   'backup.chooseFolder': BackupStatus
   'backup.openFolder': null
   'backup.restore': { restored: boolean }
-  'import.pickCsv': CsvFile | null
-  'import.post': ImportResult
+  'bank.pickStatement': StatementPreview | null
+  'bank.uploadStatement': StatementPreview
+  'bank.previewStatement': StatementPreview
+  'bank.importStatement': StatementImportResult
+  'bank.list': BankTransaction[]
+  'bank.categorize': BankTransaction
+  'bank.uncategorize': BankTransaction
+  'bank.exclude': BankTransaction
+  'bank.rules': BankRule[]
+  'bank.saveRule': BankRule
+  'bank.deleteRule': null
+  'vehicles.list': Vehicle[]
+  'vehicles.save': Vehicle
+  'vehicles.trips': VehicleTrip[]
+  'vehicles.addTrip': VehicleTrip
+  'vehicles.deleteTrip': null
+  'vehicles.setYear': VehicleBenefit
+  'vehicles.benefit': VehicleBenefit
+  'vehicles.limits': VehicleLimits
+  'cca.schedule': CcaSchedule
+  'cca.assets': Asset[]
+  'cca.setOpening': CcaSchedule
+  'cca.dispose': Asset[]
+  'tax.adjustments': TaxAdjustments
+  'issues.list': Issue[]
+  'audit.list': AuditEvent[]
+  'package.export': { savedTo: string | null; receipts: number }
+  'receipts.list': Receipt[]
+  'receipts.pick': Receipt[]
+  'receipts.upload': Receipt
+  'receipts.open': null
+  'migration.pickFile': PendingMigration | null
+  'migration.uploadFile': PendingMigration
+  'migration.import': MigrationResult
+  'migration.openingBalances': { entryId: number }
 }
 
 export type Output<M extends Method> = Outputs[M]

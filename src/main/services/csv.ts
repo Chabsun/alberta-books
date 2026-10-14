@@ -46,7 +46,8 @@ export function parseCsv(text: string): string[][] {
 function safeCell(v: string | number): string {
   if (typeof v === 'number') return String(v)
   let s = v
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
+  // A plain negative number like -42.00 is data, not a formula.
+  if (/^[=+\-@\t\r]/.test(s) && !/^-\d+(\.\d+)?$/.test(s)) s = `'${s}`
   if (/[",\n\r]/.test(s)) s = `"${s.replace(/"/g, '""')}"`
   return s
 }

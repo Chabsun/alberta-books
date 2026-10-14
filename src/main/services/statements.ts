@@ -7,6 +7,7 @@ import { UserError } from '../errors'
 import { parseCsvDate, type CsvDateFormat } from '../../shared/dates'
 import { parseMoney } from '../../shared/money'
 import { parseCsv } from './csv'
+import type { StatementPreview } from '../../shared/types'
 
 export interface ParsedTransaction {
   date: string
@@ -188,4 +189,32 @@ export function parseStatement(fileName: string, bytes: Uint8Array, mapping?: Cs
   const rows = readCsvFile(text)
   if (rows.length === 0) throw new UserError('The file is empty.')
   return parseCsvStatement(rows, mapping ?? guessMapping(rows))
+}
+
+/** What the import screen shows before importing: the raw CSV rows, the column mapping and a sample. */
+export function previewStatement(
+  fileName: string,
+  bytes: Uint8Array,
+  mapping?: CsvMapping
+): Omit<StatementPreview, 'token'> {
+  const text = decodeStatement(bytes)
+  const isOfx = looksLikeOfx(text) || /\.(ofx|qfx|qbo)$/i.test(fileName)
+  const rows = isOfx ? [] : readCsvFile(text)
+  const used = isOfx ? null : (mapping ?? guessMapping(rows))
+  let parsed: ParsedStatement
+  try {
+    parsed = isOfx ? parseOfx(text) : parseStatement(fileName, bytes, used ?? undefined)
+  } catch (err) {
+    if (!(err instanceof UserError)) throw err
+    parsed = { format: isOfx ? 'ofx' : 'csv', transactions: [], warnings: [err.message] }
+  }
+  return {
+    fileName,
+    format: parsed.format,
+    rows: rows.slice(0, 50).map((r) => r.map((c) => c.slice(0, 120))),
+    mapping: used,
+    sample: parsed.transactions.slice(0, 50).map((t) => ({ date: t.date, amountCents: t.amountCents, description: t.description })),
+    total: parsed.transactions.length,
+    warnings: parsed.warnings.slice(0, 20)
+  }
 }

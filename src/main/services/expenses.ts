@@ -11,7 +11,7 @@
 import type { Db } from '../db/connection'
 import { UserError } from '../errors'
 import { GST_NUMBER_RE, receiptRequirements, taxRule } from '../../shared/taxRules'
-import type { Expense } from '../../shared/types'
+import type { Expense, ExpensePreview } from '../../shared/types'
 import { accountIdByRole, getAccount, requireAccount } from './accounts'
 import { audit } from './audit'
 import { splitExpense } from './expenseMath'
@@ -122,7 +122,7 @@ export function getExpense(db: Db, id: number): Expense {
 }
 
 /** Shows how an expense would be treated, before saving it. */
-export function previewExpense(db: Db, input: ExpenseInput) {
+export function previewExpense(db: Db, input: ExpenseInput): ExpensePreview {
   const account = getAccount(db, input.accountId)
   const rule = taxRule(accountRule(db, input.accountId))
   const vehicle = input.vehicleId ? db.get<{ zero_emission: number }>('SELECT zero_emission FROM vehicles WHERE id = ?', input.vehicleId) : undefined

@@ -19,6 +19,8 @@ import type { Db } from '../db/connection'
 import { addDays, fiscalYearOf } from '../../shared/dates'
 import { CCA_CLASSES, type CcaClassId } from '../../shared/taxRules'
 import type { CcaRow, CcaSchedule } from '../../shared/types'
+import { UserError } from '../errors'
+import { audit } from './audit'
 import { getSettings } from './settings'
 
 interface AssetRow {
@@ -156,6 +158,7 @@ export function setOpeningUcc(db: Db, ccaClass: CcaClassId, asOf: string, uccCen
     asOf,
     uccCents
   )
+  audit(db, 'update', 'cca_opening', null, `Class ${ccaClass}: opening UCC ${uccCents} as of ${asOf}`)
 }
 
 export function listAssets(db: Db) {
@@ -174,5 +177,12 @@ export function listAssets(db: Db) {
 }
 
 export function disposeAsset(db: Db, id: number, date: string, proceedsCents: number): void {
-  db.run('UPDATE assets SET disposed_date = ?, proceeds = ? WHERE id = ? AND disposed_date IS NULL', date, proceedsCents, id)
+  const a = db.get<{ available_date: string; disposed_date: string | null; description: string }>('SELECT available_date, disposed_date, description FROM assets WHERE id = ?', id)
+  if (!a) throw new UserError('Asset not found.')
+  if (a.disposed_date) throw new UserError('That asset is already sold or disposed of.')
+  if (date < a.available_date) throw new UserError('The sale date cannot be before the asset was put into use.')
+  const { lockDate } = getSettings(db)
+  if (lockDate && date <= lockDate) throw new UserError('That date is in a locked period.')
+  db.run('UPDATE assets SET disposed_date = ?, proceeds = ? WHERE id = ?', date, proceedsCents, id)
+  audit(db, 'dispose', 'asset', id, `${a.description}: sold ${date} for ${proceedsCents}`)
 }

@@ -3,17 +3,10 @@
  * The database refuses edits and deletes of these rows.
  */
 import type { Db } from '../db/connection'
+import type { AuditEvent } from '../../shared/types'
 
-export interface AuditEvent {
-  id: number
-  at: string
-  actor: string
-  action: string
-  entity: string
-  entityId: number | null
-  summary: string
-  entryId: number | null
-}
+export type { AuditEvent }
+
 
 export function audit(
   db: Db,

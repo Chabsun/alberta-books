@@ -535,3 +535,33 @@ export interface Issue {
   link?: string
   count?: number
 }
+
+/** How an expense will be treated under CRA rules, shown before saving. */
+export interface ExpensePreview {
+  account: string
+  rule: { id: string; label: string; guidance: string; reference: string; deductiblePct: number; itcPct: number; gst: string }
+  costCents: number
+  itcCents: number
+  personalCents: number
+  nonDeductibleCents: number
+  asset: { ccaClass: string; capitalCostCents: number } | null
+  notes: string[]
+  receiptMustShow: string[]
+}
+
+export interface AuditEvent {
+  id: number
+  at: string
+  actor: string
+  action: string
+  entity: string
+  entityId: number | null
+  summary: string
+  entryId: number | null
+}
+
+export interface PendingMigration {
+  token: string
+  fileName: string
+  analysis: MigrationAnalysis
+}

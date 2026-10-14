@@ -12,12 +12,40 @@ import type { BackupStatus } from '../shared/types'
 import type { AppContext } from './context'
 import { UserError } from './errors'
 import { invoiceHtml, renderPdf } from './pdf'
-import { getAccount, listAccounts, saveAccount } from './services/accounts'
-import { importRows } from './services/bankImport'
+import { holdFile, releaseFile, takeFile } from './pendingFiles'
+import { buildAccountantPackage } from './services/accountantPackage'
+import { listAccounts, saveAccount } from './services/accounts'
+import { listAudit } from './services/audit'
 import { listBackups } from './services/backup'
+import {
+  categorize,
+  deleteRule,
+  excludeTransaction,
+  importStatement,
+  listBankTransactions,
+  listRules,
+  saveRule,
+  uncategorize
+} from './services/bankFeed'
+import { ccaSchedule, disposeAsset, listAssets, setOpeningUcc } from './services/cca'
 import { getClient, listClients, saveClient } from './services/clients'
-import { parseCsv, toCsv } from './services/csv'
-import { createExpense, listExpenses, voidExpense } from './services/expenses'
+import { toCsv } from './services/csv'
+import { createExpense, listExpenses, previewExpense, updateExpenseDetails, voidExpense } from './services/expenses'
+import { findIssues } from './services/issues'
+import { analyzeJournal, importJournal, setOpeningBalances } from './services/migration'
+import { addReceipt, listReceipts, receiptPath } from './services/receipts'
+import { previewStatement } from './services/statements'
+import { taxAdjustments } from './services/taxAdjustments'
+import {
+  addTrip,
+  deleteTrip,
+  listTrips,
+  listVehicles,
+  saveVehicle,
+  setVehicleYear,
+  vehicleBenefit,
+  vehicleLimits
+} from './services/vehicles'
 import {
   deleteDraft,
   getInvoice,
@@ -44,8 +72,6 @@ import { getSettings, updateSettings } from './services/settings'
 
 type Handlers = { [M in Method]: (input: ParsedInput<M>, ctx: AppContext) => Output<M> | Promise<Output<M>> }
 
-const MAX_CSV_BYTES = 5 * 1024 * 1024
-
 function parentWindow(): BrowserWindow | undefined {
   return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
 }
@@ -57,6 +83,59 @@ async function saveFile(defaultName: string, filters: Electron.FileFilter[], dat
   if (result.canceled || !result.filePath) return null
   writeFileSync(result.filePath, data)
   return result.filePath
+}
+
+/** Opens files the user picks and reads them (with a size limit). The UI never sees the paths. */
+async function openFiles(
+  title: string,
+  filters: Electron.FileFilter[],
+  maxMb: number,
+  multiple = false
+): Promise<{ fileName: string; bytes: Uint8Array }[]> {
+  const win = parentWindow()
+  const options: Electron.OpenDialogOptions = {
+    title,
+    filters,
+    properties: multiple ? ['openFile', 'multiSelections'] : ['openFile']
+  }
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+  if (result.canceled) return []
+  return result.filePaths.map((file) => {
+    if (statSync(file).size > maxMb * 1024 * 1024) throw new UserError(`"${basename(file)}" is larger than ${maxMb} MB.`)
+    return { fileName: basename(file), bytes: new Uint8Array(readFileSync(file)) }
+  })
+}
+
+const STATEMENT_FILTERS = [
+  { name: 'Bank statements (OFX, QFX, QBO, CSV)', extensions: ['ofx', 'qfx', 'qbo', 'csv', 'txt'] },
+  { name: 'All files', extensions: ['*'] }
+]
+const RECEIPT_FILTERS = [{ name: 'Receipts (PDF or photo)', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'heic'] }]
+const JOURNAL_FILTERS = [{ name: 'Journal export (CSV or Excel)', extensions: ['csv', 'txt', 'xlsx'] }]
+
+function stageStatement(fileName: string, bytes: Uint8Array) {
+  const preview = previewStatement(fileName, bytes)
+  return { token: holdFile('statement', fileName, bytes), ...preview }
+}
+
+function stageMigration(ctx: AppContext, fileName: string, bytes: Uint8Array) {
+  const analysis = analyzeJournal(ctx.db, fileName, bytes)
+  return { token: holdFile('migration', fileName, bytes), fileName, analysis }
+}
+
+function addReceipts(ctx: AppContext, files: { fileName: string; bytes: Uint8Array }[], link: { expenseId?: number; bankTransactionId?: number }) {
+  const added = []
+  const errors: string[] = []
+  for (const f of files) {
+    try {
+      added.push(addReceipt(ctx.db, ctx.receiptsDir, { ...f, ...link }))
+    } catch (err) {
+      if (!(err instanceof UserError)) throw err
+      errors.push(`${f.fileName}: ${err.message}`)
+    }
+  }
+  if (errors.length && !added.length) throw new UserError(errors.join(' '))
+  return added
 }
 
 function backupStatus(ctx: AppContext): BackupStatus {
@@ -107,7 +186,9 @@ export const handlers: Handlers = {
   },
 
   'expenses.list': (_i, ctx) => listExpenses(ctx.db),
+  'expenses.preview': (input, ctx) => previewExpense(ctx.db, input),
   'expenses.create': (input, ctx) => createExpense(ctx.db, input),
+  'expenses.updateDetails': (input, ctx) => updateExpenseDetails(ctx.db, input.id, input),
   'expenses.void': (input, ctx) => voidExpense(ctx.db, input.id, input.date),
 
   'journal.list': (input, ctx) => listEntries(ctx.db, input?.limit ?? 500),
@@ -224,26 +305,94 @@ export const handlers: Handlers = {
     return { restored: true }
   },
 
-  'import.pickCsv': async () => {
-    const win = parentWindow()
-    const options: Electron.OpenDialogOptions = {
-      title: 'Choose a bank statement (CSV)',
-      filters: [{ name: 'CSV files', extensions: ['csv', 'txt'] }],
-      properties: ['openFile']
-    }
-    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    if (result.canceled || !result.filePaths[0]) return null
-    const file = result.filePaths[0]
-    if (statSync(file).size > MAX_CSV_BYTES) throw new UserError('That file is larger than 5 MB. Export a shorter date range.')
-    const rows = parseCsv(readFileSync(file, 'utf8'))
-    if (rows.length < 2) throw new UserError('That file has no transactions.')
-    if (rows.length > 5001) throw new UserError('That file has more than 5,000 rows. Export a shorter date range.')
-    const width = Math.max(...rows.map((r) => r.length))
-    const pad = (r: string[]) => [...r, ...Array(width - r.length).fill('')].map((c) => c.slice(0, 300))
-    return { fileName: basename(file), headers: pad(rows[0]), rows: rows.slice(1).map(pad) }
+  'bank.pickStatement': async () => {
+    const [file] = await openFiles('Choose a bank or credit card statement', STATEMENT_FILTERS, 10)
+    return file ? stageStatement(file.fileName, file.bytes) : null
   },
-  'import.post': (input, ctx) => {
-    getAccount(ctx.db, input.bankAccountId)
-    return importRows(ctx.db, input.bankAccountId, input.rows)
-  }
+  'bank.uploadStatement': (input) => stageStatement(input.fileName, input.bytes),
+  'bank.previewStatement': (input) => {
+    const f = takeFile('statement', input.token)
+    return { token: input.token, ...previewStatement(f.fileName, f.bytes, input.mapping) }
+  },
+  'bank.importStatement': (input, ctx) => {
+    const f = takeFile('statement', input.token)
+    const result = importStatement(ctx.db, { bankAccountId: input.bankAccountId, fileName: f.fileName, bytes: f.bytes, mapping: input.mapping })
+    releaseFile(input.token)
+    return result
+  },
+  'bank.list': (input, ctx) => listBankTransactions(ctx.db, input ?? {}),
+  'bank.categorize': (input, ctx) => categorize(ctx.db, input.id, input.target, input.remember),
+  'bank.uncategorize': (input, ctx) => uncategorize(ctx.db, input.id, input.date),
+  'bank.exclude': (input, ctx) => excludeTransaction(ctx.db, input.id, input.reason),
+  'bank.rules': (_i, ctx) => listRules(ctx.db),
+  'bank.saveRule': (input, ctx) => saveRule(ctx.db, input),
+  'bank.deleteRule': (input, ctx) => {
+    deleteRule(ctx.db, input.id)
+    return null
+  },
+
+  'vehicles.list': (_i, ctx) => listVehicles(ctx.db),
+  'vehicles.save': (input, ctx) => saveVehicle(ctx.db, input),
+  'vehicles.trips': (input, ctx) => listTrips(ctx.db, input.vehicleId, input.from, input.to),
+  'vehicles.addTrip': (input, ctx) => addTrip(ctx.db, input),
+  'vehicles.deleteTrip': (input, ctx) => {
+    deleteTrip(ctx.db, input.id)
+    return null
+  },
+  'vehicles.setYear': (input, ctx) => {
+    setVehicleYear(ctx.db, input.vehicleId, input.year, input)
+    return vehicleBenefit(ctx.db, input.vehicleId, input.year)
+  },
+  'vehicles.benefit': (input, ctx) => vehicleBenefit(ctx.db, input.vehicleId, input.year),
+  'vehicles.limits': (input, ctx) => vehicleLimits(ctx.db, input.vehicleId, input.fiscalYearEnd),
+
+  'cca.schedule': (input, ctx) => ccaSchedule(ctx.db, input.fiscalYearEnd),
+  'cca.assets': (_i, ctx) => listAssets(ctx.db),
+  'cca.setOpening': (input, ctx) => {
+    setOpeningUcc(ctx.db, input.ccaClass, input.asOf, input.uccCents)
+    return ccaSchedule(ctx.db, input.asOf)
+  },
+  'cca.dispose': (input, ctx) => {
+    disposeAsset(ctx.db, input.id, input.date, input.proceedsCents)
+    return listAssets(ctx.db)
+  },
+  'tax.adjustments': (input, ctx) => taxAdjustments(ctx.db, input.fiscalYearEnd),
+  'issues.list': (_i, ctx) => findIssues(ctx.db),
+  'audit.list': (input, ctx) => listAudit(ctx.db, input ?? {}),
+  'package.export': async (input, ctx) => {
+    const pkg = await buildAccountantPackage(ctx.db, ctx.receiptsDir, input.fiscalYearEnd, renderPdf)
+    const savedTo = await saveFile(pkg.fileName, [{ name: 'Zip archive', extensions: ['zip'] }], Buffer.from(pkg.zip))
+    if (savedTo) shell.showItemInFolder(savedTo)
+    return { savedTo, receipts: pkg.receipts }
+  },
+
+  'receipts.list': (input, ctx) => listReceipts(ctx.db, input),
+  'receipts.pick': async (input, ctx) => addReceipts(ctx, await openFiles('Attach receipts', RECEIPT_FILTERS, 15, true), input),
+  'receipts.upload': (input, ctx) => {
+    const { fileName, bytes, ...link } = input
+    return addReceipts(ctx, [{ fileName, bytes }], link)[0]!
+  },
+  'receipts.open': async (input, ctx) => {
+    // Stored names are <sha256>.<pdf|jpg|png|webp|heic> (checked by receiptPath): opens in the default viewer.
+    const error = await shell.openPath(receiptPath(ctx.db, ctx.receiptsDir, input.id))
+    if (error) throw new UserError(`The receipt could not be opened: ${error}`)
+    return null
+  },
+
+  'migration.pickFile': async (_i, ctx) => {
+    const [file] = await openFiles('Choose a QuickBooks or Zoho journal export', JOURNAL_FILTERS, 20)
+    return file ? stageMigration(ctx, file.fileName, file.bytes) : null
+  },
+  'migration.uploadFile': (input, ctx) => stageMigration(ctx, input.fileName, input.bytes),
+  'migration.import': (input, ctx) => {
+    const f = takeFile('migration', input.token)
+    const { token: _t, ...opts } = input
+    const result = importJournal(ctx.db, f.fileName, f.bytes, opts)
+    if (!input.dryRun) {
+      releaseFile(input.token)
+      ctx.backup()
+    }
+    return result
+  },
+  'migration.openingBalances': (input, ctx) => ({ entryId: setOpeningBalances(ctx.db, input.date, input.balances) })
 }
