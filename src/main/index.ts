@@ -126,7 +126,8 @@ function createWindow(): void {
     show: false,
     title: 'Alberta Books',
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0b0d' : '#f7f7f8',
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 20 } } : {}),
+    // macOS: content under an inset title bar. Windows/Linux: native frame, menu bar shown with Alt.
+    ...(isMac ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 20 } } : { autoHideMenuBar: true }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,

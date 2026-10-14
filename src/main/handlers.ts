@@ -3,7 +3,7 @@
  * here already validated. File dialogs are opened by the main process, so
  * the UI never chooses or sees file paths.
  */
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { Method, Output, ParsedInput } from '../shared/api'
@@ -72,6 +72,11 @@ const money = (cents: number) => Number(centsToPlain(cents))
 
 export const handlers: Handlers = {
   'app.info': (_i, ctx) => ({ version: app.getVersion(), platform: process.platform, databasePath: ctx.dbPath }),
+  // Keeps the Windows title bar (and native dialogs) in the same light/dark mode as the app.
+  'app.setTheme': (input) => {
+    nativeTheme.themeSource = input.theme
+    return null
+  },
 
   'settings.get': (_i, ctx) => getSettings(ctx.db),
   'settings.update': (input, ctx) => updateSettings(ctx.db, input),

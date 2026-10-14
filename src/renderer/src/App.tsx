@@ -147,7 +147,7 @@ function Sidebar({ path }: { path: string }) {
   const settings = useQuery('settings.get')
   const isMac = window.books.platform === 'darwin'
   return (
-    <aside className="drag flex w-[232px] shrink-0 flex-col border-r border-line bg-canvas">
+    <aside className={cx('flex w-[232px] shrink-0 flex-col border-r border-line bg-canvas', isMac && 'drag')}>
       <div className={cx('px-4 pb-4', isMac ? 'pt-12' : 'pt-5')}>
         <div className="flex items-center gap-2.5">
           <div className="flex size-8 items-center justify-center rounded-lg bg-accent text-accent-ink shadow-sm">

@@ -16,6 +16,8 @@ function read(): ThemeChoice {
 function apply(choice: ThemeChoice) {
   const dark = choice === 'dark' || (choice === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
   document.documentElement.classList.toggle('dark', dark)
+  // Match the native window frame (the title bar on Windows) to the app.
+  void window.books.call('app.setTheme', { theme: choice })
 }
 
 export function initTheme(): void {

@@ -3,6 +3,7 @@ productName: Alberta Books
 copyright: Copyright © 2026 AlexCk
 directories:
   output: dist
+  buildResources: build
 files:
   - out/**/*
   - package.json
@@ -15,14 +16,38 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  executableName: AlbertaBooks
+  legalTrademarks: Alberta Books
+
+# Windows installer: installs for the current user (no admin prompt), lets you
+# pick the folder, adds Start menu and desktop shortcuts. Uninstalling never
+# deletes your books: they live in %APPDATA%\Alberta Books.
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Alberta Books
+  deleteAppDataOnUninstall: false
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  artifactName: Alberta-Books-Setup-${version}.${ext}
+
 mac:
+  icon: build/icon.png
   category: public.app-category.finance
   target:
     - target: dmg
       arch: [arm64, x64]
   hardenedRuntime: true
-win:
-  target: nsis
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
+
+linux:
+  icon: build/icon.png
+  target: AppImage
