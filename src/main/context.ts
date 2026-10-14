@@ -2,8 +2,10 @@
  * App-wide state for the main process: the open database and where files live.
  * The database handle is replaced when a backup is restored.
  */
-import { copyFileSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { Db } from './db/connection'
+import { receiptFiles } from './services/receipts'
 import { backupTo, listBackups, pruneBackups, validateDatabaseFile } from './services/backup'
 import { getSettings } from './services/settings'
 import { logError } from './log'
@@ -12,11 +14,27 @@ export class AppContext {
   db: Db
   private changesAtLastBackup = 0
 
+  /** Receipt files live next to the database. */
+  readonly receiptsDir: string
+
   constructor(
     readonly dbPath: string,
     readonly autoBackupDir: string
   ) {
     this.db = new Db(dbPath)
+    this.receiptsDir = join(dirname(dbPath), 'receipts')
+  }
+
+  /** Copies receipt files a backup folder doesn't have yet (they never change, so a copy is final). */
+  private copyReceipts(from: string, to: string): void {
+    const names = receiptFiles(this.db)
+    if (names.length === 0) return
+    mkdirSync(to, { recursive: true })
+    for (const n of names) {
+      const src = join(from, n)
+      const dst = join(to, n)
+      if (existsSync(src) && !existsSync(dst)) copyFileSync(src, dst)
+    }
   }
 
   private totalChanges(): number {
@@ -31,11 +49,13 @@ export class AppContext {
   backup(): string {
     const path = backupTo(this.db, this.autoBackupDir)
     pruneBackups(this.autoBackupDir)
+    this.copyReceipts(this.receiptsDir, join(this.autoBackupDir, 'receipts'))
     const extra = getSettings(this.db).backupDir
     if (extra) {
       try {
         backupTo(this.db, extra)
         pruneBackups(extra)
+        this.copyReceipts(this.receiptsDir, join(extra, 'receipts'))
       } catch (err) {
         // The extra folder may be on a disconnected drive; the automatic backup still succeeded.
         logError('backup:extra', err)
@@ -78,6 +98,12 @@ export class AppContext {
     } finally {
       this.db = new Db(this.dbPath)
       this.changesAtLastBackup = this.totalChanges()
+    }
+    // Bring back receipt files kept alongside the backup.
+    try {
+      this.copyReceipts(join(dirname(sourcePath), 'receipts'), this.receiptsDir)
+    } catch (err) {
+      logError('restore:receipts', err)
     }
   }
 

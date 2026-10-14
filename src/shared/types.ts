@@ -427,3 +427,111 @@ export interface TaxAdjustments {
   donationsCents: number
   notes: string[]
 }
+
+// ---------------------------------------------------------------- bank feed
+
+export interface BankTransaction {
+  id: number
+  accountId: number
+  accountName: string
+  date: string
+  /** Positive = money in, negative = money out. */
+  amountCents: number
+  description: string
+  payee: string | null
+  status: 'unreviewed' | 'posted' | 'excluded'
+  entryId: number | null
+  linkKind: 'expense' | 'payment' | 'entry' | 'transfer' | null
+  linkId: number | null
+  /** Where it was posted, once categorized. */
+  category: string | null
+  suggestedAccountId: number | null
+  suggestedAccountName: string | null
+  suggestedInvoiceId: number | null
+  /** 'rule:<id>', 'history', 'invoice' or 'transfer'. */
+  suggestionSource: string | null
+  note: string
+}
+
+export interface BankRule {
+  id: number
+  pattern: string
+  matchType: 'contains' | 'equals' | 'starts'
+  direction: 'any' | 'in' | 'out'
+  accountId: number
+  accountName: string
+  gstIncluded: boolean
+  businessPct: number
+  autoPost: boolean
+}
+
+export interface StatementImportResult {
+  format: 'ofx' | 'csv'
+  rowsInFile: number
+  inserted: number
+  duplicates: number
+  autoPosted: number
+  warnings: string[]
+  /** Bank's closing balance (OFX) compared with the books. */
+  balanceCheck?: { bankCents: number; booksCents: number; asOf: string }
+}
+
+export interface StatementPreview {
+  token: string
+  fileName: string
+  format: 'ofx' | 'csv'
+  /** CSV only: the raw rows (first 50) and the guessed column mapping. */
+  rows: string[][]
+  mapping: {
+    date: number
+    description: number
+    amount?: number
+    debit?: number
+    credit?: number
+    dateFormat: 'ymd' | 'mdy' | 'dmy'
+    hasHeader: boolean
+    flipSigns?: boolean
+  } | null
+  /** Transactions as they will be imported with the current mapping (first 50). */
+  sample: { date: string; amountCents: number; description: string }[]
+  total: number
+  warnings: string[]
+}
+
+// ---------------------------------------------------------------- migration, receipts, issues
+
+export interface MigrationAnalysis {
+  transactions: number
+  lines: number
+  from: string | null
+  to: string | null
+  /** Source account names and the account they will go to (null = choose one). */
+  accounts: { name: string; accountId: number | null }[]
+  unbalanced: number
+}
+
+export interface MigrationResult {
+  dryRun: boolean
+  imported: number
+  skipped: { key: string; reason: string }[]
+}
+
+export interface Receipt {
+  id: number
+  fileName: string
+  mime: string
+  sizeBytes: number
+  expenseId: number | null
+  bankTransactionId: number | null
+  note: string
+  createdAt: string
+}
+
+export interface Issue {
+  severity: 'error' | 'warning' | 'info'
+  code: string
+  message: string
+  /** Where to fix it in the app. */
+  link?: string
+  count?: number
+}

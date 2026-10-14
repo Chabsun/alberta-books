@@ -12,9 +12,9 @@ import {
   voidPayment
 } from '../src/main/services/invoices'
 import { createExpense, voidExpense } from '../src/main/services/expenses'
-import { createManualEntry, getEntry } from '../src/main/services/ledger'
+import { createManualEntry } from '../src/main/services/ledger'
 import { balanceSheet, dashboard, fileGstReturn, gifiReport, gstReturn, incomeStatement, trialBalance, accountLedger } from '../src/main/services/reports'
-import { importRows } from '../src/main/services/bankImport'
+import { categorize, excludeTransaction, getBankTransaction, importStatement, listBankTransactions, uncategorize } from '../src/main/services/bankFeed'
 import { getSettings, updateSettings } from '../src/main/services/settings'
 import { backupTo, listBackups, pruneBackups, validateDatabaseFile } from '../src/main/services/backup'
 import { parseCsv, toCsv } from '../src/main/services/csv'
@@ -263,48 +263,86 @@ describe('reports', () => {
   })
 })
 
-describe('bank import', () => {
-  it('posts categorized rows, matches invoices, and skips duplicates on re-import', () => {
+describe('bank feed', () => {
+  const ofx = (rows: [string, number, string, string][]) =>
+    new TextEncoder().encode(
+      `OFXHEADER:100\nCHARSET:1252\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><BANKTRANLIST>` +
+        rows.map(([d, a, n, id]) => `<STMTTRN><TRNTYPE>OTHER<DTPOSTED>${d}<TRNAMT>${a}<FITID>${id}<NAME>${n}</STMTTRN>`).join('') +
+        `</BANKTRANLIST><LEDGERBAL><BALAMT>9000.00<DTASOF>20260430</LEDGERBAL></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`
+    )
+
+  it('imports National Bank style OFX, skips re-imports, and suggests invoices', () => {
     const db = makeDb()
     const bank = role(db, 'bank')
     const inv = issued(db, 10000, '2026-04-01')
-    const rows = [
-      { date: '2026-04-05', description: 'COFFEE SHOP', amountCents: -525, target: { kind: 'account' as const, accountId: acct(db, '5110'), gstIncluded: true } },
-      { date: '2026-04-05', description: 'COFFEE SHOP', amountCents: -525, target: { kind: 'account' as const, accountId: acct(db, '5110'), gstIncluded: true } },
-      { date: '2026-04-06', description: 'E-TRANSFER ACME', amountCents: 10500, target: { kind: 'invoice' as const, invoiceId: inv.id } },
-      { date: '2026-04-07', description: 'MONTHLY FEE', amountCents: -1595, target: { kind: 'account' as const, accountId: acct(db, '5120'), gstIncluded: false } }
-    ]
-    expect(importRows(db, bank, rows)).toEqual({ posted: 4, skippedDuplicates: 0 })
-    // Two coffees, $5.00 + $0.25 GST each. Meals rule: half the GST back (13¢), the rest is cost.
-    expect(balanceOf(db, acct(db, '5110'))).toBe(1024)
-    expect(balanceOf(db, role(db, 'gst_itc'))).toBe(-26)
-    expect(getInvoice(db, inv.id).displayStatus).toBe('paid')
-    expect(balanceOf(db, bank)).toBe(10500 - 1050 - 1595)
-    expect(importRows(db, bank, rows)).toEqual({ posted: 0, skippedDuplicates: 4 })
-  })
-
-  it('imports nothing if any row fails', () => {
-    const db = makeDb()
-    const bank = role(db, 'bank')
-    const before = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM journal_entries')!.n
-    expect(() =>
-      importRows(db, bank, [
-        { date: '2026-04-05', description: 'OK', amountCents: -100, target: { kind: 'account', accountId: acct(db, '5120'), gstIncluded: false } },
-        { date: '2026-04-05', description: 'BAD', amountCents: -100, target: { kind: 'account', accountId: bank, gstIncluded: false } }
-      ])
-    ).toThrow(/Row 2/)
-    expect(db.get<{ n: number }>('SELECT COUNT(*) AS n FROM journal_entries')!.n).toBe(before)
-  })
-
-  it('records deposits and transfers as journal entries', () => {
-    const db = makeDb()
-    const bank = role(db, 'bank')
-    importRows(db, bank, [
-      { date: '2026-04-05', description: 'OWNER TRANSFER IN', amountCents: 50000, target: { kind: 'account', accountId: role(db, 'shareholder_loan'), gstIncluded: false } }
+    const file = ofx([
+      ['20260405', -5.25, 'COFFEE SHOP #123', 'A1'],
+      ['20260406', 105.0, 'VIREMENT INTERAC ACME', 'A2'],
+      ['20260407', -15.95, 'FRAIS MENSUELS', 'A3']
     ])
-    expect(balanceOf(db, role(db, 'shareholder_loan'))).toBe(50000)
-    const e = getEntry(db, 1)
-    expect(e.source).toBe('import')
+    const r = importStatement(db, { bankAccountId: bank, fileName: 'releve.qbo', bytes: file })
+    expect(r).toMatchObject({ format: 'ofx', inserted: 3, duplicates: 0 })
+    expect(r.balanceCheck).toEqual({ bankCents: 900000, booksCents: 0, asOf: '2026-04-30' })
+    expect(importStatement(db, { bankAccountId: bank, fileName: 'releve.qbo', bytes: file }).duplicates).toBe(3)
+
+    const queue = listBankTransactions(db, { status: 'unreviewed' })
+    const deposit = queue.find((t) => t.amountCents === 10500)!
+    expect(deposit.suggestedInvoiceId).toBe(inv.id)
+    categorize(db, deposit.id, { kind: 'invoice', invoiceId: inv.id })
+    expect(getInvoice(db, inv.id).displayStatus).toBe('paid')
+
+    const coffee = queue.find((t) => t.amountCents === -525)!
+    categorize(db, coffee.id, { kind: 'account', accountId: acct(db, '5110'), gstIncluded: true, purpose: 'Client chat', attendees: 'A. Client' }, true)
+    expect(balanceOf(db, acct(db, '5110'))).toBe(512) // $5.00 + half the GST
+    // The remembered rule suggests the same category next time.
+    importStatement(db, { bankAccountId: bank, fileName: 'may.ofx', bytes: ofx([['20260505', -6.3, 'COFFEE SHOP #124', 'B1']]) })
+    const next = listBankTransactions(db, { status: 'unreviewed' }).find((t) => t.amountCents === -630)!
+    expect(next.suggestedAccountId).toBe(acct(db, '5110'))
+    expect(next.suggestionSource).toMatch(/^rule:/)
+  })
+
+  it('undoes a categorization with a reversal, and handles transfers on both accounts', () => {
+    const db = makeDb()
+    const bank = role(db, 'bank')
+    const savings = acct(db, '1010')
+    importStatement(db, { bankAccountId: bank, fileName: 'a.ofx', bytes: ofx([['20260410', -1000, 'TRANSFER TO SAVINGS', 'T1'], ['20260411', -40, 'STAPLES', 'T2']]) })
+    importStatement(db, { bankAccountId: savings, fileName: 'b.ofx', bytes: ofx([['20260410', 1000, 'TRANSFER FROM CHEQUING', 'S1']]) })
+    const out = listBankTransactions(db, { accountId: bank }).find((t) => t.amountCents === -100000)!
+    expect(out.suggestionSource).toBe('transfer')
+    categorize(db, out.id, { kind: 'account', accountId: savings })
+    const inSavings = listBankTransactions(db, { accountId: savings })[0]
+    expect(inSavings.status).toBe('posted')
+    expect(balanceOf(db, savings)).toBe(100000)
+
+    const staples = listBankTransactions(db, { accountId: bank }).find((t) => t.amountCents === -4000)!
+    categorize(db, staples.id, { kind: 'account', accountId: acct(db, '5160'), gstIncluded: true })
+    expect(balanceOf(db, acct(db, '5160'))).toBe(3810)
+    uncategorize(db, staples.id, '2026-04-12')
+    expect(balanceOf(db, acct(db, '5160'))).toBe(0)
+    expect(getBankTransaction(db, staples.id).status).toBe('unreviewed')
+    uncategorize(db, out.id, '2026-04-12')
+    expect(getBankTransaction(db, inSavings.id).status).toBe('unreviewed')
+    expect(balanceOf(db, savings)).toBe(0)
+  })
+
+  it('reads CSV exports with English or French headers and keeps identical rows apart', () => {
+    const db = makeDb()
+    const bank = role(db, 'bank')
+    const csv = 'Date,Description,Débit,Crédit\n2026-04-05,CAFE,5.25,\n2026-04-05,CAFE,5.25,\n2026-04-06,DEPOT,,100.00\n'
+    const r = importStatement(db, { bankAccountId: bank, fileName: 'export.csv', bytes: new TextEncoder().encode(csv) })
+    expect(r).toMatchObject({ format: 'csv', inserted: 3 })
+    expect(importStatement(db, { bankAccountId: bank, fileName: 'export.csv', bytes: new TextEncoder().encode(csv) }).inserted).toBe(0)
+    const amounts = listBankTransactions(db, {}).map((t) => t.amountCents).sort((a, b) => a - b)
+    expect(amounts).toEqual([-525, -525, 10000])
+  })
+
+  it('excludes personal or duplicate rows without posting them', () => {
+    const db = makeDb()
+    const bank = role(db, 'bank')
+    importStatement(db, { bankAccountId: bank, fileName: 'a.ofx', bytes: ofx([['20260410', -12, 'NETFLIX', 'N1']]) })
+    const t = listBankTransactions(db, {})[0]
+    expect(excludeTransaction(db, t.id, 'Personal card mix-up').status).toBe('excluded')
+    expect(() => categorize(db, t.id, { kind: 'account', accountId: acct(db, '5200') })).toThrow(/already handled/)
   })
 })
 

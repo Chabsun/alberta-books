@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { splitExpense } from '../src/main/services/expenseMath'
-import { createExpense, getExpense, updateExpenseDetails, voidExpense } from '../src/main/services/expenses'
+import { createExpense, updateExpenseDetails, voidExpense } from '../src/main/services/expenses'
 import { ccaSchedule, firstYearFactor, setOpeningUcc } from '../src/main/services/cca'
 import { addTrip, saveVehicle, setVehicleYear, vehicleBenefit, vehicleLimits } from '../src/main/services/vehicles'
 import { taxAdjustments } from '../src/main/services/taxAdjustments'
