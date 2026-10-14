@@ -73,6 +73,9 @@ jobs:
           name: Alberta-Books-Windows-installer
           path: installer
       - name: Create release with the installer
-        run: gh release create "$GITHUB_REF_NAME" installer/*.exe --repo "$GITHUB_REPOSITORY" --title "Alberta Books $GITHUB_REF_NAME" --notes "Windows installer. Unsigned: if SmartScreen warns, choose More info, then Run anyway."
+        run: |
+          gh release create "$GITHUB_REF_NAME" installer/*.exe --repo "$GITHUB_REPOSITORY" \
+            --title "Alberta Books $GITHUB_REF_NAME" \
+            --notes "Windows installer. Unsigned: if SmartScreen warns, choose More info, then Run anyway."
         env:
           GH_TOKEN: ${{ github.token }}
