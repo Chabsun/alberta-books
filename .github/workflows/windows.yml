@@ -26,8 +26,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache: false
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Build the Claude Desktop bridge (bridge/main.go)
+        run: npm run bridge
 
       - name: Typecheck
         run: npm run typecheck
@@ -46,8 +54,8 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: Packaged app starts in Claude Desktop bridge mode
-        run: node e2e/packaged-bridge.mjs dist/win-unpacked/AlbertaBooks.exe
+      - name: Packaged Claude Desktop bridge runs
+        run: node e2e/packaged-bridge.mjs dist/win-unpacked/resources/alberta-books-mcp.exe
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

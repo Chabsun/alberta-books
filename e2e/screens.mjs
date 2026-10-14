@@ -8,7 +8,6 @@
  * Fails if any screen shows an error or the console reports one.
  */
 import { _electron as electron } from 'playwright'
-import electronBinary from 'electron'
 import { unzipSync, strFromU8 } from 'fflate'
 import { spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
@@ -338,9 +337,10 @@ const tokens = await (await fetch(`${base}/token`, { method: 'POST', headers: { 
 const overview = await mcp(tokens.access_token, 'tools/call', { name: 'get_overview', arguments: {} })
 if (!JSON.parse(overview.content[0].text).company.name.startsWith('Chabsun')) throw new Error('OAuth token did not work')
 
-// Claude Desktop bridge: this app started with --mcp-stdio, talking over stdin/stdout.
-const bridge = spawn(electronBinary, [join(root, 'out/main/index.js'), '--mcp-stdio', ...(process.getuid?.() === 0 ? ['--no-sandbox'] : [])], {
-  env: { ...process.env, ALBERTA_BOOKS_DATA_DIR: dataDir, ALBERTA_BOOKS_TOKEN: token, ...(process.getuid?.() === 0 ? { ALBERTA_BOOKS_TEST_ROOT: '1' } : {}) },
+// Claude Desktop bridge program (bridge/main.go) talking over stdin/stdout to the running app.
+const bridgeExe = join(root, 'build', 'bin', process.platform === 'win32' ? 'alberta-books-mcp.exe' : 'alberta-books-mcp')
+const bridge = spawn(bridgeExe, [], {
+  env: { ...process.env, ALBERTA_BOOKS_TOKEN: token, ALBERTA_BOOKS_SERVER_INFO: join(dataDir, 'ai-server.json') },
   stdio: ['pipe', 'pipe', 'pipe']
 })
 let bridgeOut = ''

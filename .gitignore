@@ -7,3 +7,4 @@ e2e/screenshots/
 *.db-wal
 *.db-shm
 .DS_Store
+build/bin/

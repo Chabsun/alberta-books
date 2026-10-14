@@ -26,16 +26,6 @@ const KEY = {
 /** Written next to the books so `--mcp-stdio` can find the running server. */
 export const serverInfoPath = () => join(app.getPath('userData'), 'ai-server.json')
 
-export function readServerUrl(): string {
-  try {
-    const { port } = JSON.parse(readFileSync(serverInfoPath(), 'utf8')) as { port: number }
-    if (Number.isInteger(port) && port > 0 && port < 65536) return `http://127.0.0.1:${port}`
-  } catch {
-    // not started yet
-  }
-  return `http://127.0.0.1:${DEFAULT_PORT}`
-}
-
 /** Claude Desktop's config file (regular install, or the Microsoft Store version's private folder). */
 export function claudeDesktopConfigPath(): string | null {
   if (process.platform === 'darwin') return join(app.getPath('home'), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')
@@ -225,15 +215,31 @@ export class AiManager {
     return response === 0 ? 'write' : response === 1 ? 'read' : null
   }
 
-  /** The command Claude Desktop runs: this app with --mcp-stdio. */
-  private bridgeCommand(): { command: string; args: string[] } {
-    return app.isPackaged ? { command: process.execPath, args: ['--mcp-stdio'] } : { command: process.execPath, args: [app.getAppPath(), '--mcp-stdio'] }
+  /** The bridge program Claude Desktop runs (bridge/main.go), shipped next to the app's resources. */
+  private bridgeExe(): string {
+    const exe = process.platform === 'win32' ? 'alberta-books-mcp.exe' : 'alberta-books-mcp'
+    const command = app.isPackaged ? join(process.resourcesPath, exe) : join(app.getAppPath(), 'build', 'bin', exe)
+    if (!existsSync(command)) throw new UserError('The Claude Desktop connector is missing from this installation. Reinstall Alberta Books.')
+    return command
+  }
+
+  private bridgeCommand(command: string, token: string): { command: string; args: string[]; env: Record<string, string> } {
+    return {
+      command,
+      args: [],
+      env: {
+        ALBERTA_BOOKS_TOKEN: token,
+        ALBERTA_BOOKS_SERVER_INFO: serverInfoPath(),
+        ...(app.isPackaged ? { ALBERTA_BOOKS_APP: process.execPath } : {})
+      }
+    }
   }
 
   /** Creates a token for Claude Desktop and adds Alberta Books to its config (keeping a .bak copy). */
   connectClaudeDesktop(mode: AiMode): AiStatus {
     const path = claudeDesktopConfigPath()
     if (!path) throw new UserError('Claude Desktop is not available on this system.')
+    const exe = this.bridgeExe()
     let config: { mcpServers?: Record<string, unknown> } & Record<string, unknown> = {}
     if (existsSync(path)) {
       try {
@@ -245,7 +251,7 @@ export class AiManager {
     }
     if (typeof config !== 'object' || config === null || Array.isArray(config)) throw new UserError('Claude Desktop’s settings file is not in the expected format.')
     const { token } = createTokenConnection(this.ctx().db, 'Claude Desktop', mode)
-    config.mcpServers = { ...(config.mcpServers ?? {}), 'alberta-books': { ...this.bridgeCommand(), env: { ALBERTA_BOOKS_TOKEN: token } } }
+    config.mcpServers = { ...(config.mcpServers ?? {}), 'alberta-books': this.bridgeCommand(exe, token) }
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify(config, null, 2))
     return this.status()

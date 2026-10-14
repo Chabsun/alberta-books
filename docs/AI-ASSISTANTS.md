@@ -35,17 +35,22 @@ keeps a `.bak` copy of the previous file:
 {
   "mcpServers": {
     "alberta-books": {
-      "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Alberta Books\\AlbertaBooks.exe",
-      "args": ["--mcp-stdio"],
-      "env": { "ALBERTA_BOOKS_TOKEN": "abk_…" }
+      "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Alberta Books\\resources\\alberta-books-mcp.exe",
+      "args": [],
+      "env": {
+        "ALBERTA_BOOKS_TOKEN": "abk_…",
+        "ALBERTA_BOOKS_SERVER_INFO": "C:\\Users\\you\\AppData\\Roaming\\Alberta Books\\ai-server.json",
+        "ALBERTA_BOOKS_APP": "C:\\Users\\you\\AppData\\Local\\Programs\\Alberta Books\\AlbertaBooks.exe"
+      }
     }
   }
 }
 ```
 
-Claude starts `AlbertaBooks.exe --mcp-stdio`. That process has no window and
-doesn't open your books. It passes Claude's requests to the running app, and
-starts the app if it isn't open.
+`alberta-books-mcp.exe` is a small connector program installed with the app
+(source in `bridge/main.go`, standard library only). It has no window and
+doesn't open your books. It passes Claude's requests to the running app on
+this computer, and starts the app if it isn't open.
 
 ## 3. Claude Code
 

@@ -15,10 +15,11 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "e2e": "npm run build && node e2e/screens.mjs",
+    "bridge": "go build -C bridge -trimpath -ldflags=-s -o ../build/bin/",
+    "e2e": "npm run bridge && npm run build && node e2e/screens.mjs",
     "check": "npm run typecheck && npm run test && npm run build",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:mac": "npm run bridge && npm run build && electron-builder --mac",
+    "dist:win": "npm run bridge && npm run build && electron-builder --win"
   },
   "dependencies": {
     "fflate": "^0.8.3",

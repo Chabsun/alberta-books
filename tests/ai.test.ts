@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { request } from 'node:http'
-import { mkdtempSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTokenConnection, revokeConnection, type AiMode } from '../src/main/ai/connections'
@@ -254,57 +255,74 @@ describe('tool catalogue', () => {
   })
 })
 
-describe('Claude Desktop stdio bridge', () => {
-  it('relays requests line by line, skips notifications, and starts the app when needed', async () => {
-    const { PassThrough } = await import('node:stream')
-    const { runStdioBridge } = await import('../src/main/ai/stdio')
+// The bridge program Claude Desktop runs (bridge/main.go). Built by `npm run bridge`.
+const BRIDGE = join(__dirname, '..', 'build', 'bin', process.platform === 'win32' ? 'alberta-books-mcp.exe' : 'alberta-books-mcp')
+
+function runBridge(env: Record<string, string>, lines: unknown[]): Promise<{ code: number | null; out: string; err: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(BRIDGE, [], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (c) => (out += c))
+    child.stderr.on('data', (c) => (err += c))
+    child.on('exit', (code) => resolve({ code, out, err }))
+    child.stdin.end(lines.map((l) => JSON.stringify(l) + '\n').join(''))
+  })
+}
+
+describe.skipIf(!existsSync(BRIDGE))('Claude Desktop bridge program', () => {
+  it('relays requests line by line, skips notifications, and reads the port the app wrote', async () => {
     const { db, server } = await setup()
     const { token } = createTokenConnection(db, 'Claude Desktop', 'read')
-    const port = server.port
-    await server.stop() // "app not running"
-
-    const input = new PassThrough()
-    const output = new PassThrough()
-    let out = ''
-    output.on('data', (c) => (out += c))
-    let launched = 0
-    const done = runStdioBridge({
-      input,
-      output,
-      serverUrl: () => `http://127.0.0.1:${port}`,
-      token,
-      launchApp: () => {
-        launched++
-        void server.start(port)
-      },
-      log: () => {},
-      startupTimeoutMs: 5000
-    })
-    input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }) + '\n')
-    input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
-    input.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'get_overview', arguments: {} } }) + '\n')
-    input.end()
-    await done
-    const lines = out.trim().split('\n').map((l) => JSON.parse(l))
-    expect(launched).toBe(1)
+    const info = join(mkdtempSync(join(tmpdir(), 'books-bridge-')), 'ai-server.json')
+    writeFileSync(info, JSON.stringify({ port: server.port }))
+    const r = await runBridge({ ALBERTA_BOOKS_TOKEN: token, ALBERTA_BOOKS_SERVER_INFO: info }, [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'get_overview', arguments: {} } }
+    ])
+    expect(r.code).toBe(0)
+    const lines = r.out.trim().split('\n').map((l) => JSON.parse(l))
     expect(lines.map((l) => l.id)).toEqual([1, 2])
     expect(lines[0].result.serverInfo.name).toBe('alberta-books')
     expect(JSON.parse(lines[1].result.content[0].text).company.province).toBe('Alberta')
   })
 
-  it('answers with a JSON-RPC error when the token is rejected', async () => {
-    const { PassThrough } = await import('node:stream')
-    const { runStdioBridge } = await import('../src/main/ai/stdio')
+  it('answers with a JSON-RPC error when the key is rejected, and refuses to start without one', async () => {
     const { server } = await setup()
-    const input = new PassThrough()
-    const output = new PassThrough()
-    let out = ''
-    output.on('data', (c) => (out += c))
-    const done = runStdioBridge({ input, output, serverUrl: () => server.localUrl, token: 'abk_' + 'a'.repeat(43), launchApp: () => {}, log: () => {} })
-    input.end(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'ping' }) + '\n')
-    await done
-    expect(JSON.parse(out)).toMatchObject({ id: 7, error: { code: -32001 } })
+    const info = join(mkdtempSync(join(tmpdir(), 'books-bridge-')), 'ai-server.json')
+    writeFileSync(info, JSON.stringify({ port: server.port }))
+    const rejected = await runBridge({ ALBERTA_BOOKS_TOKEN: 'abk_' + 'a'.repeat(43), ALBERTA_BOOKS_SERVER_INFO: info }, [{ jsonrpc: '2.0', id: 7, method: 'ping' }])
+    expect(JSON.parse(rejected.out)).toMatchObject({ id: 7, error: { code: -32001 } })
+    const missing = await runBridge({ ALBERTA_BOOKS_TOKEN: '' }, [])
+    expect(missing.code).toBe(2)
+    expect(missing.out).toBe('')
+    expect(missing.err).toContain('ALBERTA_BOOKS_TOKEN')
   })
+
+  it('starts the app when it is not running', async () => {
+    const { db, server } = await setup()
+    const { token } = createTokenConnection(db, 'Claude Desktop', 'read')
+    const port = server.port
+    await server.stop()
+    const dir = mkdtempSync(join(tmpdir(), 'books-bridge-'))
+    const info = join(dir, 'ai-server.json')
+    writeFileSync(info, JSON.stringify({ port }))
+    // Stand-in for the app: a script that marks it was started; the test then brings the server up.
+    const marker = join(dir, 'launched')
+    const fakeApp = join(dir, process.platform === 'win32' ? 'app.cmd' : 'app.sh')
+    writeFileSync(fakeApp, process.platform === 'win32' ? `@echo off\r\necho x > "${marker}"\r\n` : `#!/bin/sh\necho x > "${marker}"\n`, { mode: 0o755 })
+    const watcher = setInterval(() => {
+      if (existsSync(marker)) {
+        clearInterval(watcher)
+        void server.start(port)
+      }
+    }, 50)
+    const r = await runBridge({ ALBERTA_BOOKS_TOKEN: token, ALBERTA_BOOKS_SERVER_INFO: info, ALBERTA_BOOKS_APP: fakeApp }, [{ jsonrpc: '2.0', id: 1, method: 'ping' }])
+    clearInterval(watcher)
+    expect(r.err).toContain('starting it')
+    expect(JSON.parse(r.out)).toMatchObject({ id: 1, result: {} })
+  }, 20_000)
 })
 
 describe('AI activity and undo', () => {

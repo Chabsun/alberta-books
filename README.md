@@ -55,7 +55,7 @@ turn it off).
 
 ## Develop
 
-Requires Node.js 22.13 or later.
+Requires Node.js 22.13 or later, and Go 1.22 or later to build the small Claude Desktop connector (`npm run bridge`).
 
 ```bash
 npm install
@@ -83,7 +83,8 @@ src/shared/          types, operation list (api.ts), money/date helpers, CRA rul
 src/main/db/         SQLite connection, migrations with integrity triggers, chart of accounts
 src/main/services/   ledger, invoices, expenses, bank feed, vehicles, CCA, tax adjustments, reports,
                      migration, receipts, issues, accountant package (pure, tested)
-src/main/ai/         MCP tools, JSON-RPC, HTTP + OAuth server, tunnel, Claude Desktop bridge
+src/main/ai/         MCP tools, JSON-RPC, HTTP + OAuth server, tunnel, Claude Desktop setup
+bridge/              Claude Desktop connector (stdin/stdout ↔ local server), Go standard library only
 src/main/            Electron window, IPC gateway, PDF rendering
 src/renderer/        React UI (Tailwind CSS)
 tests/               Vitest tests
