@@ -16,6 +16,19 @@ export class Db {
   readonly raw: DatabaseSync
   private readonly cache = new Map<string, StatementSync>()
   private depth = 0
+  /** Who is making changes: 'user', 'import', 'system' or 'ai:<connection name>'. Recorded in the audit log. */
+  actor = 'user'
+
+  /** Runs `fn` with changes attributed to `actor` (services are synchronous, so this cannot interleave). */
+  as<T>(actor: string, fn: () => T): T {
+    const previous = this.actor
+    this.actor = actor
+    try {
+      return fn()
+    } finally {
+      this.actor = previous
+    }
+  }
 
   constructor(path: string) {
     this.raw = new DatabaseSync(path)

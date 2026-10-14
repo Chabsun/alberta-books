@@ -1,5 +1,7 @@
 import type { Db } from '../db/connection'
 import { UserError } from '../errors'
+import { TAX_RULES, type TaxRuleId } from '../../shared/taxRules'
+import { audit } from './audit'
 import type { Account, AccountRole, AccountType } from '../../shared/types'
 
 interface AccountRow {
@@ -11,6 +13,7 @@ interface AccountRow {
   role: AccountRole | null
   is_bank: number
   archived: number
+  tax_rule: string | null
   debit: number
   credit: number
   line_count: number
@@ -26,7 +29,7 @@ export function normalBalance(type: AccountType, debit: number, credit: number):
 }
 
 const SELECT = `
-  SELECT a.id, a.code, a.name, a.type, a.gifi_code, a.role, a.is_bank, a.archived,
+  SELECT a.id, a.code, a.name, a.type, a.gifi_code, a.role, a.is_bank, a.archived, a.tax_rule,
          COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit,
          COUNT(l.id) AS line_count
   FROM accounts a
@@ -42,6 +45,7 @@ function toAccount(r: AccountRow): Account {
     role: r.role,
     isBank: r.is_bank === 1,
     archived: r.archived === 1,
+    taxRule: r.tax_rule,
     balanceCents: normalBalance(r.type, r.debit, r.credit),
     hasActivity: r.line_count > 0
   }
@@ -82,6 +86,25 @@ export interface SaveAccountInput {
   gifiCode?: string
   isBank?: boolean
   archived?: boolean
+  /** CRA rule for expense accounts and capital asset accounts. */
+  taxRule?: string | null
+}
+
+/** Checks a CRA rule fits the account type; returns the rule to store. */
+function ruleFor(type: AccountType, isBank: boolean, requested: string | null | undefined): string | null {
+  if (type === 'expense') {
+    const id = requested ?? 'standard'
+    const rule = TAX_RULES[id as TaxRuleId]
+    if (!rule) throw new UserError('Unknown CRA rule.')
+    if (rule.ccaClass) throw new UserError('Capital asset rules belong on asset accounts, not expense accounts.')
+    return id
+  }
+  if (type === 'asset' && !isBank && requested) {
+    const rule = TAX_RULES[requested as TaxRuleId]
+    if (!rule?.ccaClass) throw new UserError('Asset accounts can only use a capital asset (CCA) rule.')
+    return requested
+  }
+  return null
 }
 
 export function saveAccount(db: Db, input: SaveAccountInput): Account {
@@ -95,13 +118,15 @@ export function saveAccount(db: Db, input: SaveAccountInput): Account {
   return db.tx(() => {
     if (input.id === undefined) {
       const r = db.run(
-        'INSERT INTO accounts (code, name, type, gifi_code, is_bank) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO accounts (code, name, type, gifi_code, is_bank, tax_rule) VALUES (?, ?, ?, ?, ?, ?)',
         input.code,
         input.name,
         type,
         gifi,
-        isBank
+        isBank,
+        ruleFor(type, isBank === 1, input.taxRule)
       )
+      audit(db, 'create', 'account', r.lastInsertRowid, `${input.code} ${input.name}`)
       return getAccount(db, r.lastInsertRowid)
     }
 
@@ -118,15 +143,17 @@ export function saveAccount(db: Db, input: SaveAccountInput): Account {
       throw new UserError('The main bank account must stay a bank account.')
     }
     db.run(
-      'UPDATE accounts SET code = ?, name = ?, type = ?, gifi_code = ?, is_bank = ?, archived = ? WHERE id = ?',
+      'UPDATE accounts SET code = ?, name = ?, type = ?, gifi_code = ?, is_bank = ?, archived = ?, tax_rule = ? WHERE id = ?',
       input.code,
       input.name,
       type,
       gifi,
       isBank,
       archived ? 1 : 0,
+      ruleFor(type, isBank === 1, input.taxRule === undefined ? current.taxRule : input.taxRule),
       input.id
     )
+    audit(db, 'update', 'account', input.id, `${input.code} ${input.name}`)
     return getAccount(db, input.id)
   })
 }

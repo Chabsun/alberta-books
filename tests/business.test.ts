@@ -275,8 +275,9 @@ describe('bank import', () => {
       { date: '2026-04-07', description: 'MONTHLY FEE', amountCents: -1595, target: { kind: 'account' as const, accountId: acct(db, '5120'), gstIncluded: false } }
     ]
     expect(importRows(db, bank, rows)).toEqual({ posted: 4, skippedDuplicates: 0 })
-    expect(balanceOf(db, acct(db, '5110'))).toBe(1000) // two coffees, $5.00 each before GST
-    expect(balanceOf(db, role(db, 'gst_itc'))).toBe(-50)
+    // Two coffees, $5.00 + $0.25 GST each. Meals rule: half the GST back (13¢), the rest is cost.
+    expect(balanceOf(db, acct(db, '5110'))).toBe(1024)
+    expect(balanceOf(db, role(db, 'gst_itc'))).toBe(-26)
     expect(getInvoice(db, inv.id).displayStatus).toBe('paid')
     expect(balanceOf(db, bank)).toBe(10500 - 1050 - 1595)
     expect(importRows(db, bank, rows)).toEqual({ posted: 0, skippedDuplicates: 4 })

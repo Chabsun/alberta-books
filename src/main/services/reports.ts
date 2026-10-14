@@ -4,7 +4,7 @@
  */
 import type { Db } from '../db/connection'
 import { UserError } from '../errors'
-import { fiscalYearOf, lastMonths, todayIso, addDays } from '../../shared/dates'
+import { fiscalYearOf, lastMonths, todayIso, addDays, monthEnd } from '../../shared/dates'
 import type {
   AccountLedger,
   AccountType,
@@ -22,6 +22,7 @@ import { accountIdByRole, getAccount, normalBalance } from './accounts'
 import { listInvoices } from './invoices'
 import { listEntries, postEntry, type NewLine } from './ledger'
 import { getSettings, updateSettings } from './settings'
+import { listVehicles, vehicleBenefit, vehicleLimits } from './vehicles'
 
 interface Totals {
   id: number
@@ -168,14 +169,55 @@ export function trialBalance(db: Db, asOf: string): TrialBalance {
 // GST/HST return (GST34 lines). Alberta has no PST, so only GST applies.
 // ---------------------------------------------------------------------------
 
+interface GstAdjustment {
+  label: string
+  amountCents: number
+  /** Expense account the adjustment is charged to when the return is filed. */
+  accountCode: string
+}
+
+/**
+ * Line 104 adjustments that fall in this period:
+ *  - GST on the shareholder's company-car benefit for calendar year Y, due in
+ *    the return covering the last day of February of Y+1 (ETA s.173);
+ *  - GST claimed on vehicle lease costs above the cap, repaid in the return
+ *    covering the fiscal year end (ETA s.235).
+ */
+function gstAdjustments(db: Db, from: string, to: string): GstAdjustment[] {
+  const out: GstAdjustment[] = []
+  const vehicles = listVehicles(db)
+  if (vehicles.length === 0) return out
+  const { fiscalYearEndMonth } = getSettings(db)
+  for (let y = Number(from.slice(0, 4)) - 1; y <= Number(to.slice(0, 4)); y++) {
+    const febEnd = monthEnd(`${y + 1}-02-01`)
+    if (febEnd < from || febEnd > to) continue
+    for (const v of vehicles) {
+      const b = vehicleBenefit(db, v.id, y)
+      if (b.gstToRemitCents > 0) out.push({ label: `GST on ${y} company-car benefit – ${v.name}`, amountCents: b.gstToRemitCents, accountCode: '5231' })
+    }
+  }
+  const fyEnd = fiscalYearOf(to, fiscalYearEndMonth).end
+  const prevFyEnd = fiscalYearOf(addDays(fiscalYearOf(to, fiscalYearEndMonth).start, -1), fiscalYearEndMonth).end
+  for (const end of [fyEnd, prevFyEnd]) {
+    if (end < from || end > to) continue
+    for (const v of vehicles) {
+      const lim = vehicleLimits(db, v.id, end)
+      if (lim.leaseItcRepayCents > 0) out.push({ label: `GST on lease cost over the cap (FY ending ${end}) – ${v.name}`, amountCents: lim.leaseItcRepayCents, accountCode: '5233' })
+    }
+  }
+  return out
+}
+
 export function gstReturn(db: Db, from: string, to: string): GstReturn {
   const t = totals(db, from, to, 'gst_return')
   const collectedId = accountIdByRole(db, 'gst_collected')
   const itcId = accountIdByRole(db, 'gst_itc')
   const collected = t.find((x) => x.id === collectedId)
   const itc = t.find((x) => x.id === itcId)
-  const line105 = collected ? collected.credit - collected.debit : 0
-  const line108 = itc ? itc.debit - itc.credit : 0
+  const line103 = collected ? collected.credit - collected.debit : 0
+  const adjustments = gstAdjustments(db, from, to)
+  const line104 = adjustments.reduce((s, a) => s + a.amountCents, 0)
+  const line106 = itc ? itc.debit - itc.credit : 0
   const line101 = t.filter((x) => x.type === 'income').reduce((s, x) => s + (x.credit - x.debit), 0)
   const filedRow = db.get<{ id: number; filed_at: string }>(
     'SELECT id, filed_at FROM gst_returns WHERE period_start = ? AND period_end = ?',
@@ -187,9 +229,13 @@ export function gstReturn(db: Db, from: string, to: string): GstReturn {
     from,
     to,
     line101,
-    line105,
-    line108,
-    line109: line105 - line108,
+    line103,
+    line104,
+    line105: line103 + line104,
+    line106,
+    line108: line106,
+    line109: line103 + line104 - line106,
+    adjustments: adjustments.map((a) => ({ label: a.label, amountCents: a.amountCents })),
     filed: filedRow ? { id: filedRow.id, filedAt: filedRow.filed_at } : null,
     locked: lockDate !== null && from <= lockDate
   }
@@ -216,7 +262,12 @@ export function fileGstReturn(db: Db, from: string, to: string): GstReturn {
       const itcId = accountIdByRole(db, 'gst_itc')
       const owingId = accountIdByRole(db, 'gst_owing')
       // Zero out the period's activity in the two working accounts...
-      lines.push(r.line105 >= 0 ? { accountId: collectedId, debit: r.line105, credit: 0 } : { accountId: collectedId, debit: 0, credit: -r.line105 })
+      lines.push(r.line103 >= 0 ? { accountId: collectedId, debit: r.line103, credit: 0 } : { accountId: collectedId, debit: 0, credit: -r.line103 })
+      // Line 104 adjustments are a cost to the corporation.
+      for (const a of gstAdjustments(db, from, to)) {
+        const acc = db.get<{ id: number }>('SELECT id FROM accounts WHERE code = ?', a.accountCode)
+        lines.push({ accountId: acc?.id ?? accountIdByRole(db, 'gst_owing'), debit: a.amountCents, credit: 0, memo: a.label })
+      }
       lines.push(r.line108 >= 0 ? { accountId: itcId, debit: 0, credit: r.line108 } : { accountId: itcId, debit: -r.line108, credit: 0 })
       // ...and put the net into the amount owing to (or refundable from) CRA.
       lines.push(r.line109 >= 0 ? { accountId: owingId, debit: 0, credit: r.line109 } : { accountId: owingId, debit: -r.line109, credit: 0 })

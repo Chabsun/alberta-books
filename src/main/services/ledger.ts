@@ -7,6 +7,7 @@
  * audit trail. The database triggers enforce this independently.
  */
 import type { Db } from '../db/connection'
+import { audit } from './audit'
 import { UserError } from '../errors'
 import { isIsoDate } from '../../shared/dates'
 import { isCents } from '../../shared/money'
@@ -25,6 +26,8 @@ export interface NewEntry {
   source: EntrySource
   lines: NewLine[]
   reversesId?: number
+  /** Finer origin than `source`: 'opening', 'bank', 'quickbooks', 'zoho', 'cca', 'gst_adjustment'... */
+  origin?: string
 }
 
 /** Drops zero lines and merges nothing else; validates the entry balances. */
@@ -54,11 +57,13 @@ export function postEntry(db: Db, entry: NewEntry): number {
       if (a.archived === 1 && entry.source !== 'reversal') throw new UserError('Archived accounts cannot be used.')
     }
     const { lastInsertRowid: id } = db.run(
-      'INSERT INTO journal_entries (date, memo, source, reverses_id) VALUES (?, ?, ?, ?)',
+      'INSERT INTO journal_entries (date, memo, source, reverses_id, actor, origin) VALUES (?, ?, ?, ?, ?, ?)',
       entry.date,
       entry.memo,
       entry.source,
-      entry.reversesId ?? null
+      entry.reversesId ?? null,
+      db.actor,
+      entry.origin ?? ''
     )
     for (const l of lines) {
       db.run(
@@ -71,6 +76,7 @@ export function postEntry(db: Db, entry: NewEntry): number {
       )
     }
     db.run('UPDATE journal_entries SET posted = 1 WHERE id = ?', id)
+    audit(db, entry.source === 'reversal' ? 'reverse' : 'post', 'journal_entry', id, entry.memo, id)
     return id
   })
 }
@@ -102,6 +108,7 @@ interface EntryRow {
   source: EntrySource
   reverses_id: number | null
   reversed_by_id: number | null
+  actor: string
 }
 
 interface LineRow {
@@ -115,7 +122,7 @@ interface LineRow {
 }
 
 const ENTRY_SELECT = `
-  SELECT e.id, e.date, e.memo, e.source, e.reverses_id,
+  SELECT e.id, e.date, e.memo, e.source, e.reverses_id, e.actor,
          (SELECT r.id FROM journal_entries r WHERE r.reverses_id = e.id AND r.posted = 1) AS reversed_by_id
   FROM journal_entries e
   WHERE e.posted = 1`
@@ -155,6 +162,7 @@ function attachLines(db: Db, rows: EntryRow[]): JournalEntry[] {
       source: r.source,
       reversesId: r.reverses_id,
       reversedById: r.reversed_by_id,
+      actor: r.actor,
       totalCents: lines.reduce((s, l) => s + l.debitCents, 0),
       lines
     }

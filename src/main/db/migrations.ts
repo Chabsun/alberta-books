@@ -11,6 +11,7 @@
  */
 import type { Db } from './connection'
 import { SEED_ACCOUNTS } from './seed'
+import { V1_RULES, V2_ACCOUNTS } from './seed2'
 
 /** "ABKS": identifies an Alberta Books database file (checked on restore). */
 export const APPLICATION_ID = 0x41424b53
@@ -246,6 +247,213 @@ const MIGRATIONS: ((db: Db) => void)[] = [
     for (const a of SEED_ACCOUNTS) {
       db.run(insert, a.code, a.name, a.type, a.gifi, a.role ?? null, a.isBank ? 1 : 0)
     }
+  },
+
+  // 2: audit log, CRA expense rules, bank feed queue, receipts, assets/CCA,
+  //    company vehicle, AI connections
+  (db) => {
+    db.exec(`
+      CREATE TABLE audit_log (
+        id        INTEGER PRIMARY KEY,
+        at        TEXT NOT NULL DEFAULT ${NOW},
+        actor     TEXT NOT NULL,
+        action    TEXT NOT NULL,
+        entity    TEXT NOT NULL,
+        entity_id INTEGER,
+        summary   TEXT NOT NULL DEFAULT '',
+        entry_id  INTEGER REFERENCES journal_entries(id)
+      ) STRICT;
+      CREATE INDEX audit_log_actor ON audit_log(actor, id);
+      CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
+      BEGIN SELECT RAISE(ABORT, '${USER_ERROR_PREFIX}The audit log cannot be changed.'); END;
+      CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
+      BEGIN SELECT RAISE(ABORT, '${USER_ERROR_PREFIX}The audit log cannot be changed.'); END;
+
+      ALTER TABLE journal_entries ADD COLUMN actor TEXT NOT NULL DEFAULT 'user';
+      ALTER TABLE journal_entries ADD COLUMN origin TEXT NOT NULL DEFAULT '';
+      CREATE TRIGGER journal_entries_actor_fixed BEFORE UPDATE OF actor, origin ON journal_entries
+      WHEN NEW.actor IS NOT OLD.actor OR NEW.origin IS NOT OLD.origin
+      BEGIN SELECT RAISE(ABORT, '${USER_ERROR_PREFIX}Posted journal entries cannot be changed.'); END;
+
+      ALTER TABLE accounts ADD COLUMN tax_rule TEXT;
+
+      CREATE TABLE vehicles (
+        id            INTEGER PRIMARY KEY,
+        name          TEXT NOT NULL,
+        ownership     TEXT NOT NULL CHECK (ownership IN ('owned','leased')),
+        start_date    TEXT NOT NULL ${DATE_CHECK('start_date')},
+        end_date      TEXT,
+        cost          INTEGER NOT NULL DEFAULT 0 CHECK (cost >= 0),
+        msrp          INTEGER NOT NULL DEFAULT 0 CHECK (msrp >= 0),
+        monthly_lease INTEGER NOT NULL DEFAULT 0 CHECK (monthly_lease >= 0),
+        zero_emission INTEGER NOT NULL DEFAULT 0 CHECK (zero_emission IN (0,1)),
+        notes         TEXT NOT NULL DEFAULT '',
+        archived      INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+        created_at    TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+
+      CREATE TABLE vehicle_trips (
+        id          INTEGER PRIMARY KEY,
+        vehicle_id  INTEGER NOT NULL REFERENCES vehicles(id),
+        date        TEXT NOT NULL ${DATE_CHECK('date')},
+        km          INTEGER NOT NULL CHECK (km > 0),
+        kind        TEXT NOT NULL CHECK (kind IN ('business','personal')),
+        purpose     TEXT NOT NULL DEFAULT '',
+        route       TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+      CREATE INDEX vehicle_trips_vehicle ON vehicle_trips(vehicle_id, date);
+
+      -- Per calendar year: what the shareholder paid back, and the operating-benefit election.
+      CREATE TABLE vehicle_years (
+        vehicle_id            INTEGER NOT NULL REFERENCES vehicles(id),
+        year                  INTEGER NOT NULL,
+        reimbursed_operating  INTEGER NOT NULL DEFAULT 0 CHECK (reimbursed_operating >= 0),
+        reimbursed_standby    INTEGER NOT NULL DEFAULT 0 CHECK (reimbursed_standby >= 0),
+        elect_half_standby    INTEGER NOT NULL DEFAULT 0 CHECK (elect_half_standby IN (0,1)),
+        PRIMARY KEY (vehicle_id, year)
+      ) STRICT;
+
+      CREATE TABLE assets (
+        id              INTEGER PRIMARY KEY,
+        description     TEXT NOT NULL,
+        cca_class       TEXT NOT NULL CHECK (cca_class IN ('8','10','10.1','12','12T','50','54')),
+        cost            INTEGER NOT NULL CHECK (cost >= 0),
+        acquired_date   TEXT NOT NULL ${DATE_CHECK('acquired_date')},
+        available_date  TEXT NOT NULL ${DATE_CHECK('available_date')},
+        disposed_date   TEXT,
+        proceeds        INTEGER,
+        account_id      INTEGER REFERENCES accounts(id),
+        vehicle_id      INTEGER REFERENCES vehicles(id),
+        expense_id      INTEGER REFERENCES expenses(id),
+        created_at      TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+
+      -- Undepreciated capital cost carried over from before these books (from the last T2 Schedule 8).
+      CREATE TABLE cca_opening (
+        cca_class   TEXT NOT NULL,
+        as_of       TEXT NOT NULL ${DATE_CHECK('as_of')},
+        ucc         INTEGER NOT NULL CHECK (ucc >= 0),
+        PRIMARY KEY (cca_class)
+      ) STRICT;
+
+      ALTER TABLE expenses ADD COLUMN itc INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE expenses ADD COLUMN business_pct INTEGER NOT NULL DEFAULT 100 CHECK (business_pct BETWEEN 0 AND 100);
+      ALTER TABLE expenses ADD COLUMN nondeductible INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE expenses ADD COLUMN tax_rule TEXT;
+      ALTER TABLE expenses ADD COLUMN supplier_gst_number TEXT NOT NULL DEFAULT '';
+      ALTER TABLE expenses ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+      ALTER TABLE expenses ADD COLUMN attendees TEXT NOT NULL DEFAULT '';
+      ALTER TABLE expenses ADD COLUMN vehicle_id INTEGER REFERENCES vehicles(id);
+      UPDATE expenses SET itc = gst;
+
+      CREATE TABLE import_batches (
+        id          INTEGER PRIMARY KEY,
+        account_id  INTEGER NOT NULL REFERENCES accounts(id),
+        file_name   TEXT NOT NULL,
+        format      TEXT NOT NULL,
+        sha256      TEXT NOT NULL,
+        rows        INTEGER NOT NULL,
+        inserted    INTEGER NOT NULL,
+        actor       TEXT NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+
+      CREATE TABLE bank_transactions (
+        id            INTEGER PRIMARY KEY,
+        account_id    INTEGER NOT NULL REFERENCES accounts(id),
+        date          TEXT NOT NULL ${DATE_CHECK('date')},
+        amount        INTEGER NOT NULL CHECK (amount <> 0),
+        description   TEXT NOT NULL,
+        payee         TEXT,
+        external_id   TEXT,
+        dedupe_key    TEXT NOT NULL,
+        batch_id      INTEGER REFERENCES import_batches(id),
+        status        TEXT NOT NULL DEFAULT 'unreviewed' CHECK (status IN ('unreviewed','posted','excluded')),
+        entry_id      INTEGER REFERENCES journal_entries(id),
+        link_kind     TEXT CHECK (link_kind IN ('expense','payment','entry','transfer')),
+        link_id       INTEGER,
+        suggested_account_id INTEGER REFERENCES accounts(id),
+        suggested_invoice_id INTEGER REFERENCES invoices(id),
+        suggestion_source    TEXT,
+        note          TEXT NOT NULL DEFAULT '',
+        created_at    TEXT NOT NULL DEFAULT ${NOW},
+        UNIQUE (account_id, dedupe_key)
+      ) STRICT;
+      CREATE INDEX bank_transactions_status ON bank_transactions(status, date);
+      CREATE INDEX bank_transactions_entry ON bank_transactions(entry_id);
+
+      CREATE TABLE bank_rules (
+        id            INTEGER PRIMARY KEY,
+        pattern       TEXT NOT NULL,
+        match_type    TEXT NOT NULL DEFAULT 'contains' CHECK (match_type IN ('contains','equals','starts')),
+        direction     TEXT NOT NULL DEFAULT 'any' CHECK (direction IN ('any','in','out')),
+        account_id    INTEGER NOT NULL REFERENCES accounts(id),
+        gst_included  INTEGER NOT NULL DEFAULT 1 CHECK (gst_included IN (0,1)),
+        business_pct  INTEGER NOT NULL DEFAULT 100 CHECK (business_pct BETWEEN 0 AND 100),
+        auto_post     INTEGER NOT NULL DEFAULT 0 CHECK (auto_post IN (0,1)),
+        created_at    TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+
+      CREATE TABLE receipts (
+        id                   INTEGER PRIMARY KEY,
+        sha256               TEXT NOT NULL,
+        file_name            TEXT NOT NULL,
+        mime                 TEXT NOT NULL,
+        size                 INTEGER NOT NULL,
+        stored_name          TEXT NOT NULL,
+        expense_id           INTEGER REFERENCES expenses(id),
+        bank_transaction_id  INTEGER REFERENCES bank_transactions(id),
+        note                 TEXT NOT NULL DEFAULT '',
+        actor                TEXT NOT NULL,
+        created_at           TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+      CREATE INDEX receipts_expense ON receipts(expense_id);
+
+      CREATE TABLE ai_connections (
+        id            INTEGER PRIMARY KEY,
+        name          TEXT NOT NULL,
+        kind          TEXT NOT NULL CHECK (kind IN ('token','oauth')),
+        mode          TEXT NOT NULL DEFAULT 'write' CHECK (mode IN ('read','write')),
+        token_hash    TEXT UNIQUE,
+        client_id     TEXT,
+        created_at    TEXT NOT NULL DEFAULT ${NOW},
+        last_used_at  TEXT,
+        revoked_at    TEXT
+      ) STRICT;
+
+      CREATE TABLE oauth_clients (
+        client_id      TEXT PRIMARY KEY,
+        client_name    TEXT NOT NULL,
+        redirect_uris  TEXT NOT NULL,
+        created_at     TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+
+      CREATE TABLE oauth_tokens (
+        token_hash     TEXT PRIMARY KEY,
+        kind           TEXT NOT NULL CHECK (kind IN ('access','refresh')),
+        connection_id  INTEGER NOT NULL REFERENCES ai_connections(id),
+        expires_at     TEXT NOT NULL,
+        created_at     TEXT NOT NULL DEFAULT ${NOW}
+      ) STRICT;
+    `)
+
+    for (const [code, rule] of Object.entries(V1_RULES)) {
+      db.run('UPDATE accounts SET tax_rule = ? WHERE code = ?', rule, code)
+    }
+    for (const a of V2_ACCOUNTS) {
+      db.run(
+        `INSERT INTO accounts (code, name, type, gifi_code, tax_rule) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(code) DO NOTHING`,
+        a.code,
+        a.name,
+        a.type,
+        a.gifi,
+        a.rule ?? null
+      )
+    }
+    // Expense accounts the user created in version 1 get the regular rule.
+    db.run(`UPDATE accounts SET tax_rule = 'standard' WHERE type = 'expense' AND tax_rule IS NULL`)
   }
 ]
 

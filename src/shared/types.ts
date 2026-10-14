@@ -25,6 +25,8 @@ export interface Account {
   role: AccountRole | null
   isBank: boolean
   archived: boolean
+  /** CRA rule id (see shared/taxRules.ts); expense and capital accounts only. */
+  taxRule: string | null
   /** Balance in the account's normal direction (debit for assets/expenses, credit otherwise). */
   balanceCents: number
   hasActivity: boolean
@@ -108,13 +110,28 @@ export interface Expense {
   description: string
   accountId: number
   accountName: string
+  /** Pre-tax amount on the receipt. */
   amountCents: number
+  /** GST shown on the receipt. */
   gstCents: number
+  /** GST claimed back (input tax credit) after the CRA rule. */
+  itcCents: number
   totalCents: number
+  businessPct: number
+  /** Not deductible for income tax (added back on Schedule 1). */
+  nonDeductibleCents: number
+  taxRule: string | null
+  supplierGstNumber: string
+  purpose: string
+  attendees: string
+  vehicleId: number | null
   paidFromAccountId: number
   paidFromName: string
   voided: boolean
   entryId: number
+  receiptCount: number
+  /** What CRA would still ask for (GST number, purpose, attendees, receipt). */
+  warnings: string[]
 }
 
 export type EntrySource = 'manual' | 'invoice' | 'payment' | 'expense' | 'gst_return' | 'import' | 'reversal'
@@ -135,6 +152,8 @@ export interface JournalEntry {
   source: EntrySource
   reversesId: number | null
   reversedById: number | null
+  /** 'user', 'import', 'system' or 'ai:<name>'. */
+  actor: string
   totalCents: number
   lines: JournalLine[]
 }
@@ -191,10 +210,17 @@ export interface GstReturn {
   to: string
   /** Line 101: sales and other revenue (excluding GST). */
   line101: number
+  /** Line 103: GST collected. */
+  line103: number
+  /** Line 104: adjustments added to tax (vehicle benefit GST, lease ITC repayment). */
+  line104: number
   /** Line 105: total GST collected (lines 103 + 104). */
   line105: number
+  /** Line 106: input tax credits. */
+  line106: number
   /** Line 108: total ITCs (lines 106 + 107). */
   line108: number
+  adjustments: { label: string; amountCents: number }[]
   /** Line 109: net tax. Positive = owing to CRA, negative = refund. */
   line109: number
   filed: { id: number; filedAt: string } | null
@@ -284,4 +310,120 @@ export interface CsvFile {
 export interface ImportResult {
   posted: number
   skippedDuplicates: number
+}
+
+// ---------------------------------------------------------------- vehicles, CCA, tax
+
+export interface Vehicle {
+  id: number
+  name: string
+  ownership: 'owned' | 'leased'
+  startDate: string
+  endDate: string | null
+  /** Purchase price before tax (owned). */
+  costCents: number
+  /** Manufacturer's list price before tax (leased; for the lease cap). */
+  msrpCents: number
+  /** Monthly lease payment before tax (leased). */
+  monthlyLeaseCents: number
+  zeroEmission: boolean
+  notes: string
+  archived: boolean
+}
+
+export interface VehicleTrip {
+  id: number
+  vehicleId: number
+  date: string
+  km: number
+  kind: 'business' | 'personal'
+  purpose: string
+  route: string
+}
+
+export interface VehicleBenefit {
+  vehicleId: number
+  year: number
+  daysAvailable: number
+  monthsAvailable: number
+  businessKm: number
+  personalKm: number
+  businessUsePct: number
+  standbyChargeCents: number
+  operatingBenefitCents: number
+  totalBenefitCents: number
+  gstToRemitCents: number
+  reimbursedOperatingCents: number
+  reimbursedStandbyCents: number
+  electHalfStandby: boolean
+  operatingRatePerKmCents: number
+  notes: string[]
+}
+
+export interface VehicleLimits {
+  vehicleId: number
+  fiscalYearStart: string
+  fiscalYearEnd: string
+  daysInYear: number
+  leaseCostCents: number
+  leaseFormulaACents: number
+  leaseFormulaBCents: number
+  leaseDeductibleCents: number
+  leaseExcessCents: number
+  leaseItcRepayCents: number
+  interestCostCents: number
+  interestCapCents: number
+  interestExcessCents: number
+}
+
+export interface CcaRow {
+  ccaClass: string
+  label: string
+  ratePct: number
+  openingUccCents: number
+  additionsCents: number
+  disposalsCents: number
+  incentiveAdjustmentCents: number
+  ccaCents: number
+  recaptureCents: number
+  terminalLossCents: number
+  closingUccCents: number
+}
+
+export interface CcaSchedule {
+  fiscalYearStart: string
+  fiscalYearEnd: string
+  rows: CcaRow[]
+  totalCcaCents: number
+  notes: string[]
+}
+
+export interface Asset {
+  id: number
+  description: string
+  ccaClass: string
+  costCents: number
+  acquiredDate: string
+  availableDate: string
+  disposedDate: string | null
+  proceedsCents: number | null
+}
+
+export interface TaxAdjustmentLine {
+  label: string
+  amountCents: number
+  note?: string
+}
+
+/** Net income for tax purposes (T2 Schedule 1 style), estimated from the books. */
+export interface TaxAdjustments {
+  fiscalYearStart: string
+  fiscalYearEnd: string
+  netIncomeBooksCents: number
+  addBacks: TaxAdjustmentLine[]
+  deductions: TaxAdjustmentLine[]
+  netIncomeForTaxCents: number
+  /** Charitable donations, deducted separately on Schedule 2. */
+  donationsCents: number
+  notes: string[]
 }
