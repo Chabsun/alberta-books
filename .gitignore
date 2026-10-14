@@ -1,6 +1,9 @@
 node_modules/
 out/
 dist/
+test-results/
+e2e/screenshots/
 *.db
+*.db-wal
+*.db-shm
 .DS_Store
-.env

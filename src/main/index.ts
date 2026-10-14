@@ -1,122 +1,196 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'path'
-import { writeFileSync } from 'fs'
-import { initDatabase, getDb, persist } from './db'
+/**
+ * Main process: owns the window, the database and all file access.
+ *
+ * Hardening (see Electron's security checklist):
+ *  - renderer sandboxed, context-isolated, no Node.js, no webviews
+ *  - app served from a private app:// scheme with a strict Content-Security-Policy
+ *  - all navigation and new windows blocked; all permission requests denied
+ *  - a single instance, so two copies can never write to the same books
+ */
+import { app, BrowserWindow, dialog, Menu, nativeTheme, net, protocol, session, shell } from 'electron'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { AppContext } from './context'
+import { registerIpc } from './ipc'
+import { initLog, logError } from './log'
+
+const APP_ORIGIN = 'app://books'
+const DEV_URL = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
+const RENDERER_DIR = resolve(__dirname, '../renderer')
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'"
+].join('; ')
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
+// Chromium's OS-level sandbox cannot run as root (CI containers only). The
+// per-window sandbox below still applies; packaged builds always enable it.
+if (app.isPackaged || process.env.ALBERTA_BOOKS_TEST_ROOT !== '1') app.enableSandbox()
+
+// Tests and development can point the app at a throwaway data folder.
+if (!app.isPackaged && process.env.ALBERTA_BOOKS_DATA_DIR) {
+  app.setPath('userData', process.env.ALBERTA_BOOKS_DATA_DIR)
+}
+
+let ctx: AppContext | null = null
+let mainWindow: BrowserWindow | null = null
+
+function isTrustedUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    if (DEV_URL) return u.origin === new URL(DEV_URL).origin
+    // URL.origin is "null" for custom schemes, so compare scheme and host.
+    return u.protocol === 'app:' && u.host === 'books'
+  } catch {
+    return false
+  }
+}
+
+function serveRenderer(): void {
+  protocol.handle('app', async (request) => {
+    const url = new URL(request.url)
+    if (url.host !== 'books') return new Response('Not found', { status: 404 })
+    let pathname: string
+    try {
+      pathname = decodeURIComponent(url.pathname)
+    } catch {
+      return new Response('Bad request', { status: 400 })
+    }
+    const file = resolve(RENDERER_DIR, '.' + (pathname === '/' ? '/index.html' : pathname))
+    const rel = relative(RENDERER_DIR, file)
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    const res = await net.fetch(pathToFileURL(file).toString())
+    const headers = new Headers(res.headers)
+    headers.set('Content-Security-Policy', CSP)
+    headers.set('X-Content-Type-Options', 'nosniff')
+    return new Response(res.body, { status: res.status, headers })
+  })
+}
+
+function hardenSessions(): void {
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
+  session.defaultSession.setPermissionCheckHandler(() => false)
+  app.on('web-contents-created', (_e, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      // Links to websites (e.g. CRA pages) open in the normal browser, never inside the app.
+      if (url.startsWith('https://')) void shell.openExternal(url)
+      return { action: 'deny' }
+    })
+    contents.on('will-navigate', (event, url) => {
+      if (!isTrustedUrl(url)) event.preventDefault()
+    })
+    contents.on('will-attach-webview', (event) => event.preventDefault())
+  })
+}
+
+function buildMenu(): void {
+  const isMac = process.platform === 'darwin'
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' as const }] : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        ...(app.isPackaged ? [] : [{ type: 'separator' as const }, { role: 'reload' as const }, { role: 'toggleDevTools' as const }])
+      ]
+    },
+    { role: 'windowMenu' }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createWindow(): void {
-  const mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 1100,
-    minHeight: 700,
+  const isMac = process.platform === 'darwin'
+  mainWindow = new BrowserWindow({
+    width: 1360,
+    height: 880,
+    minWidth: 1040,
+    minHeight: 680,
     show: false,
-    autoHideMenuBar: true,
     title: 'Alberta Books',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0b0d' : '#f7f7f8',
+    ...(isMac ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 20 } } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true,
-      allowRunningInsecureContent: false
+      webviewTag: false,
+      spellcheck: true,
+      devTools: !app.isPackaged
+    }
+  })
+  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+  void mainWindow.loadURL(DEV_URL ?? `${APP_ORIGIN}/index.html`)
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
     }
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
-  })
-
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
-  })
-
-  if (!app.isPackaged) {
-    mainWindow.loadURL('http://localhost:5173')
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
-}
-
-app.whenReady().then(async () => {
-  app.setAppUserModelId('com.albertabooks.app')
-  await initDatabase()
-  createWindow()
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
-})
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
-
-function runQuery(sql: string, params: any[] = []): any[] {
-  const db = getDb()
-  const stmt = db.prepare(sql)
-  if (params.length) stmt.bind(params)
-  const rows: any[] = []
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject())
-  }
-  stmt.free()
-  return rows
-}
-
-function runExec(sql: string, params: any[] = []): void {
-  const db = getDb()
-  db.run(sql, params)
-  persist()
-}
-
-// DB query handler
-ipcMain.handle('db:query', async (_event, sql: string, params: any[] = []) => {
-  try {
-    const upper = sql.trim().toUpperCase()
-    if (upper.startsWith('SELECT') || upper.startsWith('PRAGMA')) {
-      return runQuery(sql, params)
-    } else {
-      runExec(sql, params)
-      return { success: true }
-    }
-  } catch (err: any) {
-    console.error('DB error:', err)
-    throw new Error(err.message || 'Database error')
-  }
-})
-
-ipcMain.handle('db:exec', async (_event, sql: string) => {
-  try {
-    const db = getDb()
-    db.exec(sql)
-    persist()
-    return { success: true }
-  } catch (err: any) {
-    throw new Error(err.message || 'Database error')
-  }
-})
-
-// Export all data for Grok Bot / backup
-ipcMain.handle('data:exportAll', async () => {
-  try {
-    const tables = ['accounts', 'customers', 'invoices', 'invoice_items', 'transactions', 'journal_lines', 'settings']
-    const data: Record<string, any[]> = {}
-
-    for (const table of tables) {
-      data[table] = runQuery(`SELECT * FROM ${table}`)
-    }
-
+  app.whenReady().then(() => {
     const userData = app.getPath('userData')
-    const exportPath = join(userData, 'alberta-books-export.json')
-    writeFileSync(exportPath, JSON.stringify(data, null, 2))
-
-    return {
-      success: true,
-      path: exportPath,
-      message: `Exported to ${exportPath}`
+    initLog(join(userData, 'logs'))
+    try {
+      ctx = new AppContext(join(userData, 'alberta-books.db'), join(userData, 'backups'))
+      ctx.backupIfOlderThan(20)
+    } catch (err) {
+      logError('startup', err)
+      dialog.showErrorBox('Alberta Books could not open your books', err instanceof Error ? err.message : String(err))
+      app.exit(1)
+      return
     }
-  } catch (err: any) {
-    throw new Error(err.message || 'Export failed')
-  }
-})
+    app.setAppUserModelId('ca.albertabooks.app')
+    hardenSessions()
+    serveRenderer()
+    registerIpc(() => ctx!, isTrustedUrl)
+    buildMenu()
+    createWindow()
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit()
+  })
+
+  app.on('will-quit', () => {
+    if (!ctx) return
+    try {
+      ctx.backupIfChanged()
+    } catch (err) {
+      logError('backup:quit', err)
+    }
+    ctx.close()
+    ctx = null
+  })
+
+  process.on('uncaughtException', (err) => logError('uncaught', err))
+}

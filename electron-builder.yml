@@ -1,13 +1,28 @@
-appId: com.albertabooks.app
+appId: ca.albertabooks.app
 productName: Alberta Books
+copyright: Copyright © 2026 AlexCk
 directories:
   output: dist
 files:
   - out/**/*
   - package.json
+asar: true
+# Lock down the Electron binary itself (https://www.electronjs.org/docs/latest/tutorial/fuses)
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+mac:
+  category: public.app-category.finance
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  hardenedRuntime: true
 win:
   target: nsis
-mac:
-  target: dmg
-linux:
-  target: AppImage
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
