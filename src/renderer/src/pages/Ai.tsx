@@ -2,11 +2,11 @@ import { useState } from 'react'
 import { Bot, Copy, Globe, KeyRound, Monitor, Power, ShieldCheck, Terminal, Undo2 } from 'lucide-react'
 import type { AiStatus } from '../../../shared/types'
 import { useFeedback } from '../components/feedback'
-import { Badge, Button, Card, EmptyState, Field, Input, LoadingBlock, Modal, Notice, Page, PageHeader, Segmented, Select, td, th, tr } from '../components/ui'
+import { Badge, Button, Card, Checkbox, EmptyState, Field, Input, LoadingBlock, Modal, Notice, Page, PageHeader, Segmented, Select, td, th, tr } from '../components/ui'
 import { call, mutate, useQuery } from '../lib/api'
 import { formatDateTime, relativeTime } from '../lib/format'
 
-type Mode = 'read' | 'write'
+type Mode = 'read' | 'write' | 'full'
 
 function useCopy() {
   const fb = useFeedback()
@@ -116,7 +116,8 @@ function ModePick({ value, onChange }: { value: Mode; onChange: (m: Mode) => voi
       onChange={onChange}
       options={[
         { value: 'write', label: 'Read and make changes' },
-        { value: 'read', label: 'Read only' }
+        { value: 'read', label: 'Read only' },
+        { value: 'full', label: 'Full control' }
       ]}
     />
   )
@@ -354,7 +355,28 @@ function Connections({ s }: { s: AiStatus }) {
                   >
                     <option value="write">Read and make changes</option>
                     <option value="read">Read only</option>
+                    <option value="full">Full control</option>
                   </Select>
+                  {c.mode === 'full' ? (
+                    <Checkbox
+                      className="mt-2 text-[13px]"
+                      label="Ask me in the app before final actions"
+                      checked={c.confirmFinal}
+                      onChange={async (e) => {
+                        const confirm = e.target.checked
+                        if (!confirm) {
+                          const ok = await fb.confirm({
+                            title: `Let ${c.name} act without asking?`,
+                            body: 'It will then issue invoices, change settings, file GST returns, restore backups and void or delete things as soon as it decides to, without a confirmation here. Everything is still logged.',
+                            confirmLabel: 'Stop asking',
+                            danger: true
+                          })
+                          if (!ok) return
+                        }
+                        mutate('ai.setConfirm', { id: c.id, confirm }).catch((err: Error) => fb.error(err.message))
+                      }}
+                    />
+                  ) : null}
                 </td>
                 <td className={`${td} text-muted`}>{c.lastUsedAt ? relativeTime(c.lastUsedAt) : 'Never'}</td>
                 <td className={`${td} text-right`}>
@@ -412,8 +434,10 @@ function Activity() {
 function Safety() {
   return (
     <Notice tone="neutral" icon={ShieldCheck}>
-      <strong>What assistants can never do:</strong> change settings or the lock date, issue or void invoices, file GST returns, restore backups, delete anything, or manage these
-      connections. They draft, categorize and record; you stay in control of anything final.
+      <strong>Access levels.</strong> <em>Read only</em> sees the books. <em>Read and make changes</em> also categorizes, records expenses, drafts invoices and posts
+      journal entries (all undoable). <em>Full control</em> also issues and voids invoices (and returns the PDF to send), changes settings and the lock date, files GST
+      returns, restores backups and voids or deletes things. With Full control the app asks you before each of those unless you turn that off. Assistants can never
+      manage these connections. Posted entries are never deleted, even by you: they are reversed, so the history stays complete.
     </Notice>
   )
 }

@@ -14,7 +14,10 @@ const INSTRUCTIONS = `Bookkeeping for a one-person Alberta corporation (GST 5%, 
 Call get_overview first, and get_cra_expense_rules before categorizing expenses.
 Amounts are dollars as strings ("42.50"). Positive bank amounts are money in.
 Never guess a business purpose, attendees or GST number: ask the user.
+Final actions (issue or void invoices, change settings, file GST, restore a backup, delete) only when the user asks for that specific action.
 Posted entries are never edited; mistakes are fixed by reversing (undo_bank_categorization, reverse_journal_entry).`
+
+const ACCESS = { read: 'read only', write: 'read and make changes', full: 'full control (final actions are confirmed by the user in the app unless they turned that off)' }
 
 type Id = string | number | null
 
@@ -37,7 +40,7 @@ function isRequest(m: unknown): m is Request {
 }
 
 /** Handles one JSON-RPC message. Returns null for notifications (no reply). */
-export function handleMessage(message: unknown, ctx: ToolContext): JsonRpcResponse | null {
+export async function handleMessage(message: unknown, ctx: ToolContext): Promise<JsonRpcResponse | null> {
   if (!isRequest(message)) {
     const id = message && typeof message === 'object' && 'id' in message ? ((message as { id: Id }).id ?? null) : null
     return fail(id, -32600, 'Invalid request')
@@ -53,7 +56,7 @@ export function handleMessage(message: unknown, ctx: ToolContext): JsonRpcRespon
         protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: `${INSTRUCTIONS}\nThis connection is ${ctx.connection.mode === 'write' ? 'read and write' : 'read only'}.`
+        instructions: `${INSTRUCTIONS}\nThis connection is ${ACCESS[ctx.connection.mode]}.`
       })
     }
     case 'ping':
@@ -64,8 +67,16 @@ export function handleMessage(message: unknown, ctx: ToolContext): JsonRpcRespon
       const name = message.params?.name
       if (typeof name !== 'string') return fail(id, -32602, 'Missing tool name')
       try {
-        const result = callTool(name, message.params?.arguments, ctx)
-        return ok(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }], isError: false })
+        const { data, files } = await callTool(name, message.params?.arguments, ctx)
+        const content: unknown[] = [{ type: 'text', text: JSON.stringify(data, null, 1) }]
+        // Files (an invoice PDF) go back as embedded resources the assistant can attach or show.
+        for (const f of files) {
+          content.push({
+            type: 'resource',
+            resource: { uri: `books://files/${encodeURIComponent(f.fileName)}`, mimeType: f.mime, blob: Buffer.from(f.bytes).toString('base64') }
+          })
+        }
+        return ok(id, { content, isError: false })
       } catch (err) {
         const text = userMessage(err)
         if (!text) logError(`mcp:${name}`, err)

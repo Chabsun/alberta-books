@@ -568,11 +568,20 @@ export interface PendingMigration {
 
 // ---------------------------------------------------------------- AI assistants
 
+/**
+ * read:  sees the books
+ * write: also categorizes, records expenses, drafts invoices, journal entries (all undoable)
+ * full:  also issues invoices, changes settings, files GST, restores backups, voids and deletes
+ */
+export type AiMode = 'read' | 'write' | 'full'
+
 export interface AiConnection {
   id: number
   name: string
   kind: 'token' | 'oauth'
-  mode: 'read' | 'write'
+  mode: AiMode
+  /** Full control only: ask in the app before each final action. */
+  confirmFinal: boolean
   clientId: string | null
   createdAt: string
   lastUsedAt: string | null

@@ -341,10 +341,11 @@ export const schemas = {
   // AI assistants (the assistants themselves can never call these)
   'ai.status': none,
   'ai.setEnabled': z.object({ enabled: z.boolean() }),
-  'ai.createToken': z.object({ name: requiredText(60, 'Name'), mode: z.enum(['read', 'write']) }),
-  'ai.connectClaudeDesktop': z.object({ mode: z.enum(['read', 'write']) }),
-  'ai.connectClaudeCode': z.object({ mode: z.enum(['read', 'write']) }),
-  'ai.setMode': z.object({ id, mode: z.enum(['read', 'write']) }),
+  'ai.createToken': z.object({ name: requiredText(60, 'Name'), mode: z.enum(['read', 'write', 'full']) }),
+  'ai.connectClaudeDesktop': z.object({ mode: z.enum(['read', 'write', 'full']) }),
+  'ai.connectClaudeCode': z.object({ mode: z.enum(['read', 'write', 'full']) }),
+  'ai.setMode': z.object({ id, mode: z.enum(['read', 'write', 'full']) }),
+  'ai.setConfirm': z.object({ id, confirm: z.boolean() }),
   'ai.revoke': z.object({ id }),
   'ai.startTunnel': z.discriminatedUnion('mode', [
     z.object({ mode: z.literal('quick') }),
@@ -451,6 +452,7 @@ export interface Outputs {
   'ai.connectClaudeDesktop': AiStatus
   'ai.connectClaudeCode': { status: AiStatus; token: string; command: string }
   'ai.setMode': AiStatus
+  'ai.setConfirm': AiStatus
   'ai.revoke': AiStatus
   'ai.startTunnel': AiStatus
   'ai.stopTunnel': AiStatus

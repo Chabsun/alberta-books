@@ -13,7 +13,7 @@ import type { AppContext } from './context'
 import { UserError } from './errors'
 import { invoiceHtml, renderPdf } from './pdf'
 import { listAiActivity, undoAiActivity } from './ai/activity'
-import { revokeConnection, setConnectionMode } from './ai/connections'
+import { revokeConnection, setConnectionConfirm, setConnectionMode } from './ai/connections'
 import { holdFile, releaseFile, takeFile } from './pendingFiles'
 import { buildAccountantPackage } from './services/accountantPackage'
 import { listAccounts, saveAccount } from './services/accounts'
@@ -410,6 +410,10 @@ export const handlers: Handlers = {
   'ai.connectClaudeCode': (input, ctx) => ctx.ai.connectClaudeCode(input.mode),
   'ai.setMode': (input, ctx) => {
     setConnectionMode(ctx.db, input.id, input.mode)
+    return ctx.ai.status()
+  },
+  'ai.setConfirm': (input, ctx) => {
+    setConnectionConfirm(ctx.db, input.id, input.confirm)
     return ctx.ai.status()
   },
   'ai.revoke': (input, ctx) => {

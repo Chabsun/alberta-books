@@ -454,6 +454,15 @@ const MIGRATIONS: ((db: Db) => void)[] = [
     }
     // Expense accounts the user created in version 1 get the regular rule.
     db.run(`UPDATE accounts SET tax_rule = 'standard' WHERE type = 'expense' AND tax_rule IS NULL`)
+  },
+
+  // 3: "Full control" for AI assistants (issue invoices, settings, GST filing, restore,
+  //    void/delete), with an optional confirmation in the app before each such action.
+  (db) => {
+    db.exec(`
+      ALTER TABLE ai_connections ADD COLUMN full_control INTEGER NOT NULL DEFAULT 0 CHECK (full_control IN (0, 1));
+      ALTER TABLE ai_connections ADD COLUMN confirm_final INTEGER NOT NULL DEFAULT 1 CHECK (confirm_final IN (0, 1));
+    `)
   }
 ]
 

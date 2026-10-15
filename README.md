@@ -3,7 +3,7 @@
 Desktop bookkeeping for a one-person Alberta corporation (GST 5%, no PST,
 dividends, no payroll): invoices, a bank feed, expenses with the CRA rules
 built in, the company vehicle, GST returns, year end and a package for your
-accountant. Claude and Grok can work in your books if you let them.
+accountant. Claude and Grok can work in your books, as far as you allow.
 
 Everything stays on your computer. The app makes no internet connections
 unless you turn on AI assistants (local only) or the Grok tunnel (until you
@@ -51,7 +51,8 @@ turn it off).
   - The AI server listens on 127.0.0.1 only and checks the Host header and Origin.
   - Personal keys and OAuth tokens are stored hashed.
   - Each assistant has read-only or read-and-change access.
-  - Assistants can't change settings, issue invoices, file returns, restore or delete anything.
+  - Three access levels: read only, read and make changes, or full control (issue invoices, settings, GST filing, restore, void/delete). Full control asks you in the app before each of those unless you turn that off.
+  - Assistants can never manage AI connections or write files to your computer.
 
 ## Develop
 

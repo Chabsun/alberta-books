@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTokenConnection, revokeConnection, type AiMode } from '../src/main/ai/connections'
 import { AiServer, type ApprovalRequest } from '../src/main/ai/server'
-import { TOOLS } from '../src/main/ai/tools'
+import { TOOLS, type ToolHost } from '../src/main/ai/tools'
 import { listAudit } from '../src/main/services/audit'
 import { importStatement, listBankTransactions } from '../src/main/services/bankFeed'
 import { listExpenses } from '../src/main/services/expenses'
@@ -18,7 +18,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.stop()))
 })
 
-async function setup(approveWith: AiMode | null = 'write') {
+async function setup(approveWith: AiMode | null = 'write', host?: ToolHost) {
   const db = makeDb()
   const approvals: ApprovalRequest[] = []
   let publicUrl: string | null = null
@@ -30,7 +30,8 @@ async function setup(approveWith: AiMode | null = 'write') {
     approve: async (r) => {
       approvals.push(r)
       return approveWith
-    }
+    },
+    host
   })
   servers.push(server)
   await server.start()
@@ -244,8 +245,10 @@ describe('tool catalogue', () => {
       expect(t.name).toMatch(/^[a-z_]{3,40}$/)
       expect(t.description.length).toBeGreaterThan(20)
     }
-    // Nothing that can't be undone or that changes settings.
-    expect([...names].some((n) => /settings|lock|delete|restore|issue_invoice|file_gst|void/.test(n))).toBe(false)
+    // Anything final (settings, issuing, filing, restoring, voiding, deleting) is a "final" tool: Full control only.
+    for (const t of TOOLS.filter((x) => /settings|delete|restore|issue_invoice|file_gst|void/.test(x.name))) expect(t.mode).toBe('final')
+    // Nothing manages AI connections.
+    expect([...names].some((n) => /connection|token|revoke/.test(n))).toBe(false)
   })
 
   it('statement import through the service and through the tool give the same result', () => {
@@ -352,5 +355,107 @@ describe('AI activity and undo', () => {
     expect(() => undoAiActivity(db, expense.id)).toThrow(/already been undone/)
     // Undo is recorded as yours, not the assistant's.
     expect(listAudit(db, { limit: 1 })[0]!.actor).toBe('user')
+  })
+})
+
+describe('Full control', () => {
+  function stubHost(answer: boolean) {
+    const calls = { confirm: [] as string[], restored: [] as string[], backups: 0 }
+    const host: ToolHost = {
+      confirm: async ({ action }) => {
+        calls.confirm.push(action)
+        return answer
+      },
+      invoicePdf: async () => ({ fileName: 'INV-1001 – Acme Energy Ltd..pdf', bytes: new TextEncoder().encode('%PDF-1.7 stub') }),
+      listBackups: () => [{ name: 'alberta-books-2026-10-01_120000.db', createdAt: '2026-10-01T18:00:00Z', sizeBytes: 1000 }],
+      restoreBackup: (name) => void calls.restored.push(name),
+      backup: () => void calls.backups++
+    }
+    return { host, calls }
+  }
+
+  async function draftInvoice(port: number, token: string, db: ReturnType<typeof makeDb>) {
+    const { saveClient } = await import('../src/main/services/clients')
+    const c = saveClient(db, { name: 'Acme Energy Ltd.', email: '', phone: '', address: '' })
+    const r = await call(port, token, 'create_invoice_draft', { client_id: c.id, issue_date: '2026-10-01', lines: [{ description: 'Consulting', quantity: 10, unit_price: '150.00' }] })
+    return r.data.id as number
+  }
+
+  it('only Full control sees final tools; others are told what access is needed', async () => {
+    const { db, server } = await setup()
+    const write = createTokenConnection(db, 'Grok', 'write').token
+    const full = createTokenConnection(db, 'Claude', 'full').token
+    const names = async (t: string) => (JSON.parse((await rpc(server.port, t, 'tools/list')).body).result.tools as { name: string }[]).map((x) => x.name)
+    expect(await names(write)).not.toContain('issue_invoice')
+    expect(await names(full)).toEqual(expect.arrayContaining(['issue_invoice', 'update_settings', 'file_gst_return', 'restore_backup', 'void_expense', 'delete_invoice_draft']))
+    const denied = await call(server.port, write, 'update_settings', { lockDate: '2026-01-31' })
+    expect(denied.isError).toBe(true)
+    expect(denied.text).toMatch(/Full control/)
+  })
+
+  it('asks in the app first; “Deny” changes nothing, “Allow” issues the invoice and returns its PDF', async () => {
+    const no = stubHost(false)
+    const a = await setup('write', no.host)
+    const t1 = createTokenConnection(a.db, 'Grok', 'full').token
+    const id1 = await draftInvoice(a.server.port, t1, a.db)
+    const declined = await call(a.server.port, t1, 'issue_invoice', { id: id1 })
+    expect(declined.isError).toBe(true)
+    expect(declined.text).toMatch(/Declined/)
+    expect(no.calls.confirm[0]).toMatch(/Issue invoice to Acme Energy Ltd\. for \$1,575\.00/)
+    const { getInvoice } = await import('../src/main/services/invoices')
+    expect(getInvoice(a.db, id1).status).toBe('draft')
+
+    const yes = stubHost(true)
+    const b = await setup('write', yes.host)
+    const t2 = createTokenConnection(b.db, 'Grok', 'full').token
+    const id2 = await draftInvoice(b.server.port, t2, b.db)
+    const r = await rpc(b.server.port, t2, 'tools/call', { name: 'issue_invoice', arguments: { id: id2 } })
+    const result = JSON.parse(r.body).result
+    expect(result.isError).toBe(false)
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status: 'issued', total: '1575.00' })
+    expect(result.content[1]).toMatchObject({ type: 'resource', resource: { mimeType: 'application/pdf' } })
+    expect(Buffer.from(result.content[1].resource.blob, 'base64').toString()).toMatch(/^%PDF/)
+    expect(listAudit(b.db, { actorPrefix: 'ai:' }).some((e) => e.action === 'issue' && e.entity === 'invoice')).toBe(true)
+  })
+
+  it('with asking turned off: settings, GST filing and restore happen when told, and are logged', async () => {
+    const { setConnectionConfirm } = await import('../src/main/ai/connections')
+    const h = stubHost(false) // would deny, but must not be asked
+    const { db, server } = await setup('write', h.host)
+    const { token, connection } = createTokenConnection(db, 'Claude', 'full')
+    setConnectionConfirm(db, connection.id, false)
+
+    const s = await call(server.port, token, 'update_settings', { fiscalYearEndMonth: 8, invoicePrefix: 'CC-' })
+    expect(s.data).toMatchObject({ fiscalYearEndMonth: 8, invoicePrefix: 'CC-' })
+    expect(listAudit(db, { actorPrefix: 'ai:' })[0]).toMatchObject({ actor: 'ai:Claude', entity: 'settings' })
+
+    const g = await call(server.port, token, 'get_report', { report: 'gst_return', from: '2026-07-01', to: '2026-09-30' })
+    expect(g.data.line109).toBe('0.00') // GST lines come back in dollars
+    const filed = await call(server.port, token, 'file_gst_return', { from: '2026-07-01', to: '2026-09-30' })
+    expect(filed.isError).toBe(false)
+    expect(h.calls.backups).toBe(1)
+
+    const bad = await call(server.port, token, 'restore_backup', { name: 'alberta-books-2020-01-01_000000.db' })
+    expect(bad.text).toMatch(/No backup with that name/)
+    await call(server.port, token, 'restore_backup', { name: 'alberta-books-2026-10-01_120000.db' })
+    expect(h.calls.restored).toEqual(['alberta-books-2026-10-01_120000.db'])
+    expect(h.calls.confirm).toHaveLength(0)
+  })
+
+  it('Grok can be approved with full control through OAuth', async () => {
+    const { server } = await setup('full')
+    const verifier = randomBytes(32).toString('base64url')
+    const challenge = createHash('sha256').update(verifier).digest('base64url')
+    const q = new URLSearchParams({ response_type: 'code', client_id: 'grok', redirect_uri: 'https://grok.com/cb', code_challenge: challenge, code_challenge_method: 'S256' })
+    const page = await http(server.port, 'GET', `/authorize?${q}`)
+    const pid = /const id = "([\w-]+)"/.exec(page.body)![1]!
+    let location: string | undefined
+    for (let i = 0; i < 50 && !location; i++) {
+      location = JSON.parse((await http(server.port, 'GET', `/authorize/status?id=${pid}`)).body).location
+      if (!location) await new Promise((r) => setTimeout(r, 20))
+    }
+    const code = new URL(location!).searchParams.get('code')!
+    const tok = await http(server.port, 'POST', '/token', { 'content-type': 'application/x-www-form-urlencoded' }, new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: 'grok' }).toString())
+    expect(JSON.parse(tok.body).scope).toBe('books.read books.write books.full')
   })
 })

@@ -27,6 +27,7 @@ import {
   type OAuthClient
 } from './connections'
 import { handleMessage, SERVER_INFO } from './mcp'
+import type { ToolHost } from './tools'
 
 export interface ApprovalRequest {
   clientName: string
@@ -43,6 +44,8 @@ export interface AiServerOptions {
   publicUrl: () => string | null
   /** Asks you in the desktop app. Resolves to the access you granted, or null for "Deny". */
   approve: (req: ApprovalRequest) => Promise<AiMode | null>
+  /** Dialogs, PDFs and backups for "Full control" actions (the desktop app). */
+  host?: ToolHost
   /** Called after every successful write by an assistant (the UI refreshes). */
   onActivity?: () => void
 }
@@ -255,10 +258,15 @@ export class AiServer {
       })
     }
     const body = await this.readJson(req, MCP_MAX_BYTES)
-    const ctx = { db: this.opts.getDb(), receiptsDir: this.opts.receiptsDir(), connection }
+    const ctx = { db: this.opts.getDb(), receiptsDir: this.opts.receiptsDir(), connection, host: this.opts.host }
     const messages = Array.isArray(body) ? body : [body]
     if (messages.length === 0 || messages.length > 50) throw new HttpError(400, 'Send 1 to 50 messages')
-    const replies = messages.map((m) => handleMessage(m, ctx)).filter((r) => r !== null)
+    const replies: unknown[] = []
+    // One at a time: a final action may wait for your answer in the app.
+    for (const m of messages) {
+      const r = await handleMessage(m, ctx)
+      if (r) replies.push(r)
+    }
     if (messages.some((m) => (m as { method?: string })?.method === 'tools/call')) this.opts.onActivity?.()
     if (replies.length === 0) return this.send(res, 202, '')
     return this.json(res, 200, Array.isArray(body) ? replies : replies[0])

@@ -13,18 +13,19 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { Db } from '../db/connection'
 import { UserError } from '../errors'
 import { audit } from '../services/audit'
-import type { AiConnection } from '../../shared/types'
+import type { AiConnection, AiMode } from '../../shared/types'
 
-export type { AiConnection }
+export type { AiConnection, AiMode }
 
-export type AiMode = 'read' | 'write'
 
 
 interface ConnectionRow {
   id: number
   name: string
   kind: 'token' | 'oauth'
-  mode: AiMode
+  mode: 'read' | 'write'
+  full_control: number
+  confirm_final: number
   client_id: string | null
   created_at: string
   last_used_at: string | null
@@ -35,12 +36,18 @@ const toConnection = (r: ConnectionRow): AiConnection => ({
   id: r.id,
   name: r.name,
   kind: r.kind,
-  mode: r.mode,
+  mode: r.full_control ? 'full' : r.mode,
+  confirmFinal: r.confirm_final === 1,
   clientId: r.client_id,
   createdAt: r.created_at,
   lastUsedAt: r.last_used_at,
   revokedAt: r.revoked_at
 })
+
+/** Stored as mode read|write plus the full_control flag. */
+const dbMode = (mode: AiMode) => (mode === 'read' ? 'read' : 'write')
+const fullFlag = (mode: AiMode) => (mode === 'full' ? 1 : 0)
+const SCOPES: Record<AiMode, string> = { read: 'books.read', write: 'books.read books.write', full: 'books.read books.write books.full' }
 
 export const ACCESS_TOKEN_SECONDS = 3600
 const REFRESH_TOKEN_DAYS = 60
@@ -72,9 +79,10 @@ export function getConnection(db: Db, id: number): AiConnection {
 export function createTokenConnection(db: Db, name: string, mode: AiMode): { connection: AiConnection; token: string } {
   const token = newSecret('abk')
   const { lastInsertRowid } = db.run(
-    `INSERT INTO ai_connections (name, kind, mode, token_hash) VALUES (?, 'token', ?, ?)`,
+    `INSERT INTO ai_connections (name, kind, mode, full_control, token_hash) VALUES (?, 'token', ?, ?, ?)`,
     cleanName(name),
-    mode,
+    dbMode(mode),
+    fullFlag(mode),
     sha256(token)
   )
   audit(db, 'create', 'ai_connection', lastInsertRowid, `${cleanName(name)} (${mode})`)
@@ -84,8 +92,17 @@ export function createTokenConnection(db: Db, name: string, mode: AiMode): { con
 export function setConnectionMode(db: Db, id: number, mode: AiMode): AiConnection {
   const c = getConnection(db, id)
   if (c.revokedAt) throw new UserError('That connection was removed.')
-  db.run('UPDATE ai_connections SET mode = ? WHERE id = ?', mode, id)
+  db.run('UPDATE ai_connections SET mode = ?, full_control = ? WHERE id = ?', dbMode(mode), fullFlag(mode), id)
   audit(db, 'update', 'ai_connection', id, `${c.name}: ${mode}`)
+  return getConnection(db, id)
+}
+
+/** Full control: whether the app asks you before each final action. */
+export function setConnectionConfirm(db: Db, id: number, confirm: boolean): AiConnection {
+  const c = getConnection(db, id)
+  if (c.revokedAt) throw new UserError('That connection was removed.')
+  db.run('UPDATE ai_connections SET confirm_final = ? WHERE id = ?', confirm ? 1 : 0, id)
+  audit(db, 'update', 'ai_connection', id, `${c.name}: ${confirm ? 'asks before final actions' : 'final actions without asking'}`)
   return getConnection(db, id)
 }
 
@@ -194,16 +211,17 @@ function issueTokens(db: Db, connectionId: number, mode: AiMode): TokenSet {
     `+${REFRESH_TOKEN_DAYS} days`
   )
   db.run(`DELETE FROM oauth_tokens WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
-  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_SECONDS, refresh_token: refresh, scope: mode === 'write' ? 'books.read books.write' : 'books.read' }
+  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_SECONDS, refresh_token: refresh, scope: SCOPES[mode] }
 }
 
 /** After you approve an assistant: one connection per approval. */
 export function createOAuthConnection(db: Db, client: OAuthClient, mode: AiMode): TokenSet {
   return db.tx(() => {
     const { lastInsertRowid } = db.run(
-      `INSERT INTO ai_connections (name, kind, mode, client_id) VALUES (?, 'oauth', ?, ?)`,
+      `INSERT INTO ai_connections (name, kind, mode, full_control, client_id) VALUES (?, 'oauth', ?, ?, ?)`,
       client.clientName,
-      mode,
+      dbMode(mode),
+      fullFlag(mode),
       client.clientId
     )
     audit(db, 'approve', 'ai_connection', lastInsertRowid, `${client.clientName} (${mode})`)
@@ -215,13 +233,13 @@ export function createOAuthConnection(db: Db, client: OAuthClient, mode: AiMode)
 export function refreshTokens(db: Db, refreshToken: string): TokenSet | null {
   if (!/^abr_[\w-]{43}$/.test(refreshToken)) return null
   return db.tx(() => {
-    const row = db.get<{ connection_id: number; mode: AiMode }>(
-      `SELECT t.connection_id, c.mode FROM oauth_tokens t JOIN ai_connections c ON c.id = t.connection_id
+    const row = db.get<{ connection_id: number; mode: 'read' | 'write'; full_control: number }>(
+      `SELECT t.connection_id, c.mode, c.full_control FROM oauth_tokens t JOIN ai_connections c ON c.id = t.connection_id
        WHERE t.token_hash = ? AND t.kind = 'refresh' AND t.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now') AND c.revoked_at IS NULL`,
       sha256(refreshToken)
     )
     if (!row) return null
     db.run('DELETE FROM oauth_tokens WHERE token_hash = ?', sha256(refreshToken))
-    return issueTokens(db, row.connection_id, row.mode)
+    return issueTokens(db, row.connection_id, row.full_control ? 'full' : row.mode)
   })
 }

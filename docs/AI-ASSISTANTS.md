@@ -20,8 +20,15 @@ In Alberta Books, open **AI assistants** and click **Turn on AI assistants**. A
 private connection point starts on this computer only
 (`http://127.0.0.1:47815/mcp`). It runs while the app is open.
 
-Each connection is either **Read only** or **Read and make changes**, and you
-can change or remove it at any time.
+Each connection has one of three access levels, which you can change or remove
+at any time:
+
+- **Read only**: sees the books.
+- **Read and make changes**: also does everyday bookkeeping that can be undone.
+- **Full control**: also does final actions when you tell it to: issue and void
+  invoices, change settings and the lock date, file GST returns, restore backups,
+  void or delete things. Unless you turn it off for that assistant, Alberta
+  Books asks **Allow / Deny** on your computer before each final action.
 
 ## 2. Claude Desktop
 
@@ -95,19 +102,32 @@ domain on Cloudflare:
 2. Add a public hostname (for example `books.yourdomain.ca`) pointing to `http://127.0.0.1:47815`.
 3. In Alberta Books, choose **My own Cloudflare domain** and paste the hostname and the tunnel token. The token is stored encrypted by Windows.
 
-## What assistants can and can't do
+## What each access level can do
 
-| Can (with "Read and make changes") | Never |
-| --- | --- |
-| Read every report, account, expense, invoice and the bank feed | Change settings or the lock date |
-| Categorize, exclude or undo bank transactions; create bank rules | Issue or void invoices |
-| Record expenses and add receipt details; attach receipts | File GST returns |
-| Import bank statements (the file content, not a path on your computer) | Restore backups or delete anything |
-| Draft invoices; post and reverse journal entries | Manage AI connections |
-| Log vehicle trips | Save files to your computer |
+| Read only | + Read and make changes | + Full control |
+| --- | --- | --- |
+| Every report, account, expense, invoice and the bank feed | Categorize, exclude or undo bank transactions; bank rules | Issue invoices (the PDF comes back to attach to an email) |
+| CRA rules, open items, vehicle benefit, GST return figures | Record expenses, add receipt details, attach receipts | Void invoices, payments and expenses |
+| Invoice PDFs, list of backups and filed GST returns | Import bank statements (the file content, not a path) | Change settings, including the fiscal year end and the lock date |
+| | Draft invoices; record client payments | File GST returns (posts the closing entry and locks the period) |
+| | Post and reverse journal entries; log vehicle trips | Restore a backup (your current books are backed up first) |
+| | | Delete draft invoices, bank rules and logbook lines |
 
-Amounts given to assistants are in dollars ("42.50"). A read-only connection
-doesn't even see the tools that make changes.
+No assistant can manage AI connections (give itself more access) or write
+files to your computer. Posted entries are never deleted, not even by you:
+mistakes are reversed, so the history stays complete.
+
+Every change is logged with the assistant's name under **What assistants
+did**, and everyday changes can be undone there.
+
+**About asking before final actions:** with this on, a final action waits for
+your Allow on the computer running Alberta Books. Through the Grok tunnel,
+answer within about 100 seconds or Cloudflare cuts the request; then just ask
+Grok again. Turn asking off for an assistant (AI assistants → Connected
+assistants) if you want it to act as soon as you tell it to.
+
+Amounts given to assistants are in dollars ("42.50"). Assistants don't even
+see the tools beyond their access level.
 
 ## Security notes
 
@@ -128,4 +148,6 @@ doesn't even see the tools that make changes.
 | Tool | Access |
 | --- | --- |
 | `get_overview`, `get_cra_expense_rules`, `list_accounts`, `list_bank_transactions`, `list_bank_rules`, `list_expenses`, `preview_expense`, `list_invoices`, `list_clients`, `get_report`, `get_account_ledger`, `list_journal_entries`, `find_issues`, `get_vehicle_summary` | read |
-| `categorize_bank_transaction`, `exclude_bank_transaction`, `undo_bank_categorization`, `create_bank_rule`, `import_bank_statement`, `create_expense`, `update_expense_details`, `attach_receipt`, `add_vehicle_trip`, `create_invoice_draft`, `create_journal_entry`, `reverse_journal_entry` | write |
+| `get_invoice_pdf`, `list_gst_filings`, `list_backups` | read |
+| `categorize_bank_transaction`, `exclude_bank_transaction`, `undo_bank_categorization`, `create_bank_rule`, `import_bank_statement`, `create_expense`, `update_expense_details`, `attach_receipt`, `add_vehicle_trip`, `create_invoice_draft`, `record_invoice_payment`, `create_journal_entry`, `reverse_journal_entry` | write |
+| `issue_invoice`, `void_invoice`, `void_invoice_payment`, `delete_invoice_draft`, `void_expense`, `delete_bank_rule`, `delete_vehicle_trip`, `update_settings`, `file_gst_return`, `restore_backup` | full control |

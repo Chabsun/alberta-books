@@ -10,8 +10,15 @@ import type { AiStatus } from '../../shared/types'
 import type { AppContext } from '../context'
 import { UserError } from '../errors'
 import { logError } from '../log'
+import { invoiceHtml, renderPdf } from '../pdf'
+import { audit } from '../services/audit'
+import { listBackups } from '../services/backup'
+import { getClient } from '../services/clients'
+import { getInvoice } from '../services/invoices'
+import { getSettings } from '../services/settings'
 import { createTokenConnection, listConnections, type AiMode } from './connections'
 import { AiServer, type ApprovalRequest } from './server'
+import type { ToolHost } from './tools'
 import { findCloudflared, installCloudflared, Tunnel } from './tunnel'
 
 export const DEFAULT_PORT = 47815
@@ -23,7 +30,7 @@ const KEY = {
   tunnelToken: 'ai_tunnel_token'
 }
 
-/** Written next to the books so `--mcp-stdio` can find the running server. */
+/** Written next to the books so the Claude Desktop connector can find the running server. */
 export const serverInfoPath = () => join(app.getPath('userData'), 'ai-server.json')
 
 /** Claude Desktop's config file (regular install, or the Microsoft Store version's private folder). */
@@ -57,6 +64,7 @@ export class AiManager {
       receiptsDir: () => this.ctx().receiptsDir,
       publicUrl: () => this.tunnel.url,
       approve: (r) => this.approve(r),
+      host: this.host(),
       onActivity: () => this.window()?.webContents.send('books:changed')
     })
     this.tunnel = new Tunnel(() => this.window()?.webContents.send('books:changed'))
@@ -185,7 +193,7 @@ export class AiManager {
 
   // ---------------------------------------------------------------- approvals and Claude
 
-  private async approve(r: ApprovalRequest): Promise<AiMode | null> {
+  private bringToFront(): BrowserWindow | null {
     const win = this.window()
     if (win) {
       if (win.isMinimized()) win.restore()
@@ -193,6 +201,48 @@ export class AiManager {
       win.focus()
       win.flashFrame(true)
     }
+    return win
+  }
+
+  /** What "Full control" tools need from the desktop app. */
+  private host(): ToolHost {
+    return {
+      confirm: async ({ assistant, action }) => {
+        const win = this.bringToFront()
+        const options: Electron.MessageBoxOptions = {
+          type: 'warning',
+          title: 'Confirm an AI assistant’s action',
+          message: `${assistant} wants to: ${action}`,
+          detail: 'Allow this only if you asked for it. You can stop these questions for this assistant in AI assistants → Connected assistants.',
+          buttons: ['Allow', 'Deny'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true
+        }
+        const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
+        win?.flashFrame(false)
+        return response === 0
+      },
+      invoicePdf: async (invoiceId) => {
+        const db = this.ctx().db
+        const inv = getInvoice(db, invoiceId)
+        const bytes = await renderPdf(invoiceHtml(inv, getSettings(db), getClient(db, inv.clientId)))
+        const fileName = `${inv.number ?? `Draft invoice ${inv.id}`} – ${inv.clientName}.pdf`.replace(/[/\\?%*:|"<>]/g, '-')
+        return { fileName, bytes: new Uint8Array(bytes) }
+      },
+      listBackups: () => listBackups(this.ctx().autoBackupDir),
+      restoreBackup: (name, actor) => {
+        const c = this.ctx()
+        c.restoreFrom(join(c.autoBackupDir, name))
+        c.db.as(actor, () => audit(c.db, 'restore', 'backup', null, name))
+        this.window()?.webContents.send('books:changed')
+      },
+      backup: () => this.ctx().backup()
+    }
+  }
+
+  private async approve(r: ApprovalRequest): Promise<AiMode | null> {
+    const win = this.bringToFront()
     const options: Electron.MessageBoxOptions = {
       type: 'question',
       title: 'Connect an AI assistant',
@@ -203,16 +253,17 @@ export class AiManager {
         '',
         'Only allow this if you just started connecting this assistant yourself.',
         '“Read only” lets it see your books. “Read and make changes” also lets it categorize transactions and record expenses (every change is logged and can be undone).',
+        '“Full control” also lets it issue invoices, change settings, file GST returns, restore backups and void or delete things. You are asked before each of those unless you turn that off.',
         'You can remove access at any time in Settings → AI assistants.'
       ].join('\n'),
-      buttons: ['Allow read and make changes', 'Allow read only', 'Deny'],
-      defaultId: 2,
-      cancelId: 2,
+      buttons: ['Allow read and make changes', 'Allow read only', 'Allow full control', 'Deny'],
+      defaultId: 3,
+      cancelId: 3,
       noLink: true
     }
     const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
     win?.flashFrame(false)
-    return response === 0 ? 'write' : response === 1 ? 'read' : null
+    return response === 0 ? 'write' : response === 1 ? 'read' : response === 2 ? 'full' : null
   }
 
   /** The bridge program Claude Desktop runs (bridge/main.go), shipped next to the app's resources. */

@@ -320,6 +320,17 @@ if (created.isError) throw new Error(`AI write failed: ${created.content[0].text
 const activity = await rpc('ai.activity')
 if (!activity.some((a) => a.actor === 'ai:E2E' && a.canUndo)) throw new Error('AI change is not in the activity log')
 
+// Full control: issue a draft invoice. The app asks first (dialog stubbed to "Allow") and returns the real PDF.
+await stubDialogs(null, null)
+const { token: fullToken } = await rpc('ai.createToken', { name: 'E2E full', mode: 'full' })
+const draftId = (await rpc('invoices.list')).find((i) => i.status === 'draft').id
+const issued = await mcp(fullToken, 'tools/call', { name: 'issue_invoice', arguments: { id: draftId } })
+if (issued.isError) throw new Error(`issue_invoice failed: ${issued.content[0].text}`)
+const pdfPart = issued.content.find((c) => c.type === 'resource')
+if (!pdfPart || !Buffer.from(pdfPart.resource.blob, 'base64').subarray(0, 4).toString().startsWith('%PDF')) throw new Error('issue_invoice did not return a PDF')
+const writeOnly = await mcp(token, 'tools/call', { name: 'update_settings', arguments: { invoicePrefix: 'X-' } })
+if (!writeOnly.isError) throw new Error('A write-only connection changed settings')
+
 // OAuth like Grok: register, authorize (approval dialog stubbed to "Allow read and make changes"), token.
 await stubDialogs(null, null)
 const reg = await (await fetch(`${base}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Grok', redirect_uris: ['https://grok.com/cb'] }) })).json()
@@ -356,6 +367,8 @@ if (bridgeCode !== 0 || bridgeLines.length !== 2 || bridgeLines[1].result.tools.
 await page.evaluate(() => (window.location.hash = '/ai'))
 await page.waitForTimeout(400)
 await page.screenshot({ path: join(shots, 'light-ai-connected.png') })
+await page.getByText('Connected assistants').scrollIntoViewIfNeeded()
+await page.screenshot({ path: join(shots, 'light-ai-connections.png') })
 await rpc('ai.setEnabled', { enabled: false })
 
 console.log(`PDF: ${pdfPath}`)

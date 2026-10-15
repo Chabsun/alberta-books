@@ -1,12 +1,16 @@
 /**
- * What an AI assistant can do with the books. Each tool is either "read" or
- * "write"; read-only connections only see read tools. Writes go through the
- * same services (and CRA rules, lock date and audit log) as the app itself,
- * attributed to the assistant ("ai:Grok").
+ * What an AI assistant can do with the books. Each tool is one of:
  *
- * Deliberately not available to assistants: settings and the lock date,
- * issuing or voiding invoices, filing GST returns, restoring backups,
- * deleting anything, managing AI connections, and saving files to disk.
+ *   read   seen by every connection
+ *   write  "Read and make changes" and "Full control": everyday bookkeeping that
+ *          can be undone (categorize, record expenses, draft invoices, …)
+ *   final  "Full control" only: issue and void invoices, change settings and the
+ *          lock date, file GST returns, restore backups, void and delete. Unless
+ *          you turned it off for that connection, the app asks you first.
+ *
+ * Everything goes through the same services (CRA rules, lock date, audit log)
+ * as the app itself, attributed to the assistant ("ai:Grok"). Assistants can
+ * never manage AI connections or write files to your computer.
  *
  * Amounts: inputs are dollar strings ("42.50"); outputs turn every
  * `...Cents` field into dollars (e.g. amountCents 4250 → amount "42.50").
@@ -18,33 +22,67 @@ import { addDays, fiscalYearOf, isIsoDate, todayIso } from '../../shared/dates'
 import { centsToPlain, parseMoney } from '../../shared/money'
 import { AUTO_LIMITS, CCA_CLASSES, receiptRequirements, TAX_RULES } from '../../shared/taxRules'
 import { accountIdByRole, getAccount, listAccounts } from '../services/accounts'
-import { categorize, excludeTransaction, getBankTransaction, importStatement, listBankTransactions, listRules, saveRule, uncategorize } from '../services/bankFeed'
+import { categorize, deleteRule, excludeTransaction, getBankTransaction, importStatement, listBankTransactions, listRules, saveRule, uncategorize } from '../services/bankFeed'
 import { ccaSchedule } from '../services/cca'
 import { listClients } from '../services/clients'
-import { createExpense, listExpenses, previewExpense, updateExpenseDetails } from '../services/expenses'
-import { getInvoice, listInvoices, saveDraft } from '../services/invoices'
+import { createExpense, getExpense, listExpenses, previewExpense, updateExpenseDetails, voidExpense } from '../services/expenses'
+import { deleteDraft, getInvoice, issueInvoice, listInvoices, recordPayment, saveDraft, voidInvoice, voidPayment } from '../services/invoices'
 import { findIssues } from '../services/issues'
 import { createManualEntry, listEntriesBetween, reverseManualEntry } from '../services/ledger'
+import { audit } from '../services/audit'
 import { addReceipt } from '../services/receipts'
-import { accountLedger, balanceSheet, dashboard, gstReturn, incomeStatement, trialBalance } from '../services/reports'
-import { getSettings } from '../services/settings'
+import { accountLedger, balanceSheet, dashboard, fileGstReturn, gstFilings, gstReturn, incomeStatement, trialBalance } from '../services/reports'
+import { getSettings, updateSettings } from '../services/settings'
+import { schemas } from '../../shared/api'
+import { formatMoney } from '../../shared/money'
 import { taxAdjustments } from '../services/taxAdjustments'
-import { addTrip, listVehicles, vehicleBenefit, vehicleLimits } from '../services/vehicles'
+import { addTrip, deleteTrip, listVehicles, vehicleBenefit, vehicleLimits } from '../services/vehicles'
 import type { AiConnection } from './connections'
+
+/** What only the desktop app can do (dialogs, PDF rendering, backup files). */
+export interface ToolHost {
+  /** Asks you in Alberta Books. Resolves true to go ahead. */
+  confirm(req: { assistant: string; action: string }): Promise<boolean>
+  invoicePdf(invoiceId: number): Promise<{ fileName: string; bytes: Uint8Array }>
+  listBackups(): { name: string; createdAt: string; sizeBytes: number }[]
+  /** Restores an automatic backup by name (the current books are backed up first). */
+  restoreBackup(name: string, actor: string): void
+  backup(): void
+}
 
 export interface ToolContext {
   db: Db
   receiptsDir: string
   connection: AiConnection
+  host?: ToolHost
 }
+
+/** A tool result that also carries files (e.g. an invoice PDF for the assistant to attach to an email). */
+export class WithFiles {
+  constructor(
+    readonly data: unknown,
+    readonly files: { fileName: string; mime: string; bytes: Uint8Array }[]
+  ) {}
+}
+
+type ToolMode = 'read' | 'write' | 'final'
 
 interface Tool<S extends z.ZodType = z.ZodType> {
   name: string
   title: string
   description: string
-  mode: 'read' | 'write'
+  mode: ToolMode
   input: S
+  /** Final tools: one sentence for the confirmation dialog. */
+  confirm?: (input: z.output<S>, ctx: ToolContext) => string
+  /** Restoring replaces the database, so it can't run inside a transaction. */
+  noTransaction?: boolean
   run: (input: z.output<S>, ctx: ToolContext) => unknown
+}
+
+function needHost(ctx: ToolContext): ToolHost {
+  if (!ctx.host) throw new UserError('This action needs the Alberta Books app to be open.')
+  return ctx.host
 }
 
 const tool = <S extends z.ZodType>(t: Tool<S>): Tool => t as unknown as Tool
@@ -81,13 +119,15 @@ function base64(s: string, maxMb: number): Uint8Array {
   return bytes
 }
 
-/** `amountCents: 4250` → `amount: "42.50"`, recursively. */
+/** `amountCents: 4250` → `amount: "42.50"` (and GST `lineNNN` cents → dollars), recursively. */
 export function toDollars(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(toDollars)
   if (v && typeof v === 'object') {
     const out: Record<string, unknown> = {}
     for (const [k, x] of Object.entries(v)) {
       if (k.endsWith('Cents') && typeof x === 'number') out[k.slice(0, -5)] = centsToPlain(x)
+      // GST return lines (line101 … line109) are cents too.
+      else if (/^line\d{3}$/.test(k) && typeof x === 'number') out[k] = centsToPlain(x)
       else out[k] = toDollars(x)
     }
     return out
@@ -556,32 +596,227 @@ export const TOOLS: Tool[] = [
     description: 'Reverses a manual journal entry by posting the opposite entry (nothing is deleted).',
     input: z.object({ id, date: date.optional() }),
     run: (i, { db }) => reverseManualEntry(db, i.id, i.date ?? todayIso())
+  }),
+
+  // ---------------------------------------------------------------- final tools (Full control)
+
+  tool({
+    name: 'record_invoice_payment',
+    title: 'Record invoice payment',
+    mode: 'write',
+    description: 'Records a client payment on an issued invoice (for payments not in the bank feed; for bank deposits use categorize_bank_transaction with invoice_id).',
+    input: z.object({ invoice_id: id, date, amount: dollars('Amount received'), account: account.describe('Bank account the money went to') }),
+    run: (i, { db }) => recordPayment(db, { invoiceId: i.invoice_id, date: i.date, amountCents: cents(i.amount), accountId: accountId(db, i.account) })
+  }),
+  tool({
+    name: 'issue_invoice',
+    title: 'Issue invoice',
+    mode: 'final',
+    description:
+      'Issues a draft invoice: it gets its final number, is posted to the books and can no longer be edited (only voided). Returns the invoice and its PDF, which you can attach to an email to the client.',
+    input: z.object({ id }),
+    confirm: (i, { db }) => {
+      const inv = getInvoice(db, i.id)
+      return `Issue invoice to ${inv.clientName} for ${formatMoney(inv.totalCents)} (it becomes final)`
+    },
+    run: async (i, ctx) => {
+      const inv = issueInvoice(ctx.db, i.id)
+      audit(ctx.db, 'issue', 'invoice', inv.id, `${inv.number} to ${inv.clientName}, ${formatMoney(inv.totalCents)}`)
+      if (!ctx.host) return inv
+      try {
+        const pdf = await ctx.host.invoicePdf(inv.id)
+        return new WithFiles(inv, [{ fileName: pdf.fileName, mime: 'application/pdf', bytes: pdf.bytes }])
+      } catch {
+        // The invoice is issued either way; the PDF can be fetched again with get_invoice_pdf.
+        return inv
+      }
+    }
+  }),
+  tool({
+    name: 'get_invoice_pdf',
+    title: 'Invoice PDF',
+    mode: 'read',
+    description: 'Returns an invoice as a PDF file (to attach to an email or show the user).',
+    input: z.object({ id }),
+    run: async (i, ctx) => {
+      const inv = getInvoice(ctx.db, i.id)
+      const pdf = await needHost(ctx).invoicePdf(inv.id)
+      return new WithFiles({ invoice: inv.number ?? `Draft ${inv.id}`, fileName: pdf.fileName }, [{ fileName: pdf.fileName, mime: 'application/pdf', bytes: pdf.bytes }])
+    }
+  }),
+  tool({
+    name: 'void_invoice',
+    title: 'Void invoice',
+    mode: 'final',
+    description: 'Voids an issued invoice by posting a reversal on the given date. The invoice number stays used, marked void.',
+    input: z.object({ id, date: date.optional() }),
+    confirm: (i, { db }) => {
+      const inv = getInvoice(db, i.id)
+      return `Void invoice ${inv.number} to ${inv.clientName} (${formatMoney(inv.totalCents)})`
+    },
+    run: (i, { db }) => voidInvoice(db, i.id, i.date ?? todayIso())
+  }),
+  tool({
+    name: 'void_invoice_payment',
+    title: 'Void payment',
+    mode: 'final',
+    description: 'Voids a recorded client payment (posts a reversal).',
+    input: z.object({ payment_id: id, date: date.optional() }),
+    confirm: (i) => `Void client payment #${i.payment_id}`,
+    run: (i, { db }) => voidPayment(db, i.payment_id, i.date ?? todayIso())
+  }),
+  tool({
+    name: 'delete_invoice_draft',
+    title: 'Delete draft invoice',
+    mode: 'final',
+    description: 'Deletes a draft invoice (issued invoices can only be voided).',
+    input: z.object({ id }),
+    confirm: (i, { db }) => {
+      const inv = getInvoice(db, i.id)
+      return `Delete the draft invoice for ${inv.clientName} (${formatMoney(inv.totalCents)})`
+    },
+    run: (i, { db }) => {
+      const inv = getInvoice(db, i.id)
+      deleteDraft(db, i.id)
+      audit(db, 'delete', 'invoice_draft', i.id, `Draft for ${inv.clientName}, ${formatMoney(inv.totalCents)}`)
+      return { deleted: true }
+    }
+  }),
+  tool({
+    name: 'void_expense',
+    title: 'Void expense',
+    mode: 'final',
+    description: 'Voids an expense by posting a reversal. For expenses from the bank feed, use undo_bank_categorization instead.',
+    input: z.object({ id, date: date.optional() }),
+    confirm: (i, { db }) => {
+      const x = getExpense(db, i.id)
+      return `Void the expense from ${x.vendor} on ${x.date} (${formatMoney(x.totalCents)})`
+    },
+    run: (i, { db }) => voidExpense(db, i.id, i.date ?? todayIso())
+  }),
+  tool({
+    name: 'delete_bank_rule',
+    title: 'Delete bank rule',
+    mode: 'final',
+    description: 'Deletes a bank rule (see list_bank_rules). Transactions it already categorized stay as they are.',
+    input: z.object({ id }),
+    confirm: (i, { db }) => `Delete the bank rule “${listRules(db).find((r) => r.id === i.id)?.pattern ?? i.id}”`,
+    run: (i, { db }) => {
+      deleteRule(db, i.id)
+      return { deleted: true }
+    }
+  }),
+  tool({
+    name: 'delete_vehicle_trip',
+    title: 'Delete logbook trip',
+    mode: 'final',
+    description: 'Deletes a vehicle logbook line.',
+    input: z.object({ id }),
+    confirm: (i) => `Delete logbook trip #${i.id}`,
+    run: (i, { db }) => {
+      deleteTrip(db, i.id)
+      return { deleted: true }
+    }
+  }),
+  tool({
+    name: 'update_settings',
+    title: 'Change settings',
+    mode: 'final',
+    description:
+      'Changes company settings: companyName, address, email, phone, gstNumber, fiscalYearEndMonth (1-12), invoicePrefix, nextInvoiceNumber, paymentTermsDays, invoiceFooter, lockDate (YYYY-MM-DD or null; nothing on or before it can be changed). Only the fields you pass change.',
+    input: schemas['settings.update'],
+    confirm: (i) => `Change settings: ${Object.entries(i).filter(([, v]) => v !== undefined).map(([k, v]) => `${k} → ${v === null ? 'none' : String(v)}`).join(', ')}`,
+    run: (i, { db }) => {
+      const changed = Object.entries(i).filter(([, v]) => v !== undefined)
+      const result = updateSettings(db, i)
+      audit(db, 'update', 'settings', null, changed.map(([k, v]) => `${k}: ${v === null ? 'none' : String(v)}`).join(', '))
+      return result
+    }
+  }),
+  tool({
+    name: 'file_gst_return',
+    title: 'File GST return',
+    mode: 'final',
+    description:
+      'Marks the GST return for a period as filed: posts the closing entry (GST owing or refund) and locks that period from changes. Do this after the return is submitted to CRA. Check it first with get_report report=gst_return.',
+    input: z.object({ from: date, to: date }),
+    confirm: (i, { db }) => {
+      const g = gstReturn(db, i.from, i.to)
+      return `File the GST return for ${i.from} to ${i.to}: net tax ${formatMoney(g.line109)} (this locks the period)`
+    },
+    run: (i, ctx) => {
+      if (i.to < i.from) throw new UserError('The start date must be on or before the end date.')
+      const r = fileGstReturn(ctx.db, i.from, i.to)
+      return r
+    }
+  }),
+  tool({
+    name: 'list_gst_filings',
+    title: 'Filed GST returns',
+    mode: 'read',
+    description: 'GST returns already marked as filed.',
+    input: z.object({}),
+    run: (_i, { db }) => gstFilings(db)
+  }),
+  tool({
+    name: 'list_backups',
+    title: 'Backups',
+    mode: 'read',
+    description: 'Automatic backups of the books, newest first.',
+    input: z.object({}),
+    run: (_i, ctx) => needHost(ctx).listBackups().slice(0, 60)
+  }),
+  tool({
+    name: 'restore_backup',
+    title: 'Restore backup',
+    mode: 'final',
+    noTransaction: true,
+    description:
+      'Replaces the books with an automatic backup (by name from list_backups). The current books are backed up first, so this can be undone by restoring that copy.',
+    input: z.object({ name: z.string().regex(/^alberta-books-\d{4}-\d{2}-\d{2}_\d{6}(-\d+)?\.db$/, 'Use a name from list_backups') }),
+    confirm: (i) => `Restore the backup “${i.name}” (your current books are backed up first)`,
+    run: (i, ctx) => {
+      const host = needHost(ctx)
+      if (!host.listBackups().some((b) => b.name === i.name)) throw new UserError('No backup with that name. Use list_backups.')
+      host.restoreBackup(i.name, `ai:${ctx.connection.name}`)
+      return { restored: i.name }
+    }
   })
 ]
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]))
 
-export function toolsFor(mode: 'read' | 'write'): Tool[] {
-  return TOOLS.filter((t) => mode === 'write' || t.mode === 'read')
+const VISIBLE: Record<'read' | 'write' | 'full', ToolMode[]> = { read: ['read'], write: ['read', 'write'], full: ['read', 'write', 'final'] }
+
+export function toolsFor(mode: 'read' | 'write' | 'full'): Tool[] {
+  return TOOLS.filter((t) => VISIBLE[mode].includes(t.mode))
 }
 
 /** MCP tool listing with JSON Schema inputs. */
-export function describeTools(mode: 'read' | 'write') {
+export function describeTools(mode: 'read' | 'write' | 'full') {
   return toolsFor(mode).map((t) => ({
     name: t.name,
     title: t.title,
-    description: t.description,
+    description: t.mode === 'final' ? `${t.description} (Final action: only when the user asks for it.)` : t.description,
     inputSchema: z.toJSONSchema(t.input, { io: 'input', unrepresentable: 'any' }),
-    annotations: { readOnlyHint: t.mode === 'read', destructiveHint: false, idempotentHint: t.mode === 'read', openWorldHint: false }
+    annotations: { readOnlyHint: t.mode === 'read', destructiveHint: t.mode === 'final', idempotentHint: t.mode === 'read', openWorldHint: false }
   }))
 }
 
-/** Runs a tool as the connected assistant. Writes are attributed to it in the journal and audit log. */
-export function callTool(name: string, args: unknown, ctx: ToolContext): unknown {
+/**
+ * Runs a tool as the connected assistant. Changes are attributed to it in the
+ * journal and audit log. Final actions are asked about in the app first
+ * unless you turned that off for this connection.
+ */
+export async function callTool(name: string, args: unknown, ctx: ToolContext): Promise<{ data: unknown; files: WithFiles['files'] }> {
   const t = TOOL_BY_NAME.get(name)
   if (!t) throw new UserError(`Unknown tool: ${name}`)
-  if (t.mode === 'write' && ctx.connection.mode !== 'write') {
-    throw new UserError('This connection is read-only. You can allow changes in Alberta Books → Settings → AI assistants.')
+  if (!VISIBLE[ctx.connection.mode].includes(t.mode)) {
+    throw new UserError(
+      t.mode === 'final'
+        ? 'This needs “Full control”. You can give it in Alberta Books → AI assistants.'
+        : 'This connection is read-only. You can allow changes in Alberta Books → AI assistants.'
+    )
   }
   const parsed = t.input.safeParse(args ?? {})
   if (!parsed.success) {
@@ -589,6 +824,20 @@ export function callTool(name: string, args: unknown, ctx: ToolContext): unknown
     throw new UserError(`Invalid input${issue?.path.length ? ` (${issue.path.join('.')})` : ''}: ${issue?.message ?? 'check the arguments'}`)
   }
   const actor = `ai:${ctx.connection.name}`
-  const result = t.mode === 'write' ? ctx.db.as(actor, () => ctx.db.tx(() => t.run(parsed.data, ctx))) : t.run(parsed.data, ctx)
-  return toDollars(result)
+  if (t.mode === 'final' && ctx.connection.confirmFinal) {
+    const action = t.confirm ? t.confirm(parsed.data, ctx) : t.title
+    const ok = await needHost(ctx).confirm({ assistant: ctx.connection.name, action })
+    if (!ok) throw new UserError('Declined in Alberta Books. Nothing was changed.')
+  }
+  let result: unknown
+  if (t.mode === 'read') result = await t.run(parsed.data, ctx)
+  else if (t.noTransaction) result = await ctx.db.as(actor, () => t.run(parsed.data, ctx))
+  else {
+    // Services are synchronous: the change commits inside the transaction; only a PDF may be awaited after.
+    const db = ctx.db
+    const pending = db.as(actor, () => db.tx(() => t.run(parsed.data, ctx)))
+    result = await pending
+  }
+  if (t.mode === 'final' && t.name === 'file_gst_return') ctx.host?.backup()
+  return result instanceof WithFiles ? { data: toDollars(result.data), files: result.files } : { data: toDollars(result), files: [] }
 }
